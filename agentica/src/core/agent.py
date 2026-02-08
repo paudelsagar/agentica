@@ -17,7 +17,6 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, Field
-
 from src.core.logger import get_logger
 from src.core.mcp import mcp_router
 from src.core.memory import MemoryManager
@@ -28,7 +27,7 @@ from src.core.usage import load_monitor, usage_tracker
 logger = get_logger(__name__)
 
 
-class EnterpriseAgentConfig(BaseModel):
+class AgenticaConfig(BaseModel):
     model_config = {"extra": "allow"}
 
     name: str
@@ -40,14 +39,14 @@ class EnterpriseAgentConfig(BaseModel):
     system_prompt: Optional[str] = None
 
 
-class EnterpriseAgent:
+class Agentica:
     """
-    Base implementation of an Enterprise Agent.
+    Base implementation of an Agentica Agent.
     Uses FastMCP for tool management and LangGraph for orchestration.
     Integrates with LangChain Chat Models for decision making.
     """
 
-    def __init__(self, config: EnterpriseAgentConfig):
+    def __init__(self, config: AgenticaConfig):
         self.config = config
         # Initialize FastMCP server for tool definitions
         self.mcp_server = FastMCP(config.name)

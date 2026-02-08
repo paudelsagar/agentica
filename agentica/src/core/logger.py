@@ -19,8 +19,16 @@ def configure_logger():
         cache_logger_on_first_use=True,
     )
 
-    # Redirect standard logging to structlog
-    logging.basicConfig(format="%(message)s", stream=sys.stdout, level=logging.INFO)
+    # Clear existing handlers to prevent duplication
+    root_logger = logging.getLogger()
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+
+    logging.basicConfig(
+        format="%(message)s",
+        stream=sys.stdout,
+        level=logging.INFO,
+    )
 
 
 def get_logger(name: str):

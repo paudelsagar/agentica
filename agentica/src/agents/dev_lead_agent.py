@@ -2,18 +2,19 @@ import re
 from typing import Any, Dict, Optional
 
 from langchain_core.runnables import RunnableConfig
-
-from src.core.agent import EnterpriseAgent
+from src.core.agent import Agentica, AgenticaConfig
 from src.core.config import load_agent_config
 
 
-class DevLeadAgent(EnterpriseAgent):
+class DevLeadAgent(Agentica):
     """
-    Agent specialized in leading a development team and coordinating Coder/Reviewer.
+    Leader of the development sub-team.
+    Orchestrates Coder and Reviewer agents.
     """
 
-    def __init__(self):
-        config = load_agent_config("DevLeadAgent")
+    def __init__(self, config: Optional[AgenticaConfig] = None):
+        if config is None:
+            config = load_agent_config("DevLeadAgent")
         super().__init__(config)
 
     async def __call__(

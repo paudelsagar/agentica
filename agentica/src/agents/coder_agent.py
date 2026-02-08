@@ -1,21 +1,24 @@
 import os
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
-from src.core.agent import EnterpriseAgent
-from src.core.config import load_agent_config
+from src.core.agent import Agentica, AgenticaConfig
+from src.core.config import (
+    load_agent_config,
+)  # Keep this for now, as it might be used if config is None
 from src.core.tool_manager import ToolManager
 
 WORKSPACE_DIR = os.path.join(os.getcwd(), "workspace")
 os.makedirs(WORKSPACE_DIR, exist_ok=True)
 
 
-class CoderAgent(EnterpriseAgent):
+class CoderAgent(Agentica):
     """
-    Agent specialized in coding tasks.
+    Handles coding tasks, including writing, executing, and creating tools.
     """
 
-    def __init__(self):
-        config = load_agent_config("CoderAgent")
+    def __init__(self, config: Optional[AgenticaConfig] = None):
+        if config is None:
+            config = load_agent_config("CoderAgent")
         super().__init__(config)
         self.tool_manager = ToolManager()
         self._register_tools()

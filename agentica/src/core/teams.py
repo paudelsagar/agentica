@@ -1,5 +1,4 @@
 from langgraph.graph import END, StateGraph
-
 from src.agents.coder_agent import CoderAgent
 from src.agents.dev_lead_agent import DevLeadAgent
 from src.agents.reviewer_agent import ReviewerAgent
@@ -8,10 +7,21 @@ from src.core.logger import get_logger
 
 logger = get_logger(__name__)
 
-# Initialize team members
-dev_lead = DevLeadAgent()
-coder = CoderAgent()
-reviewer = ReviewerAgent()
+# These will be initialized lazily to avoid loading config before DB cache is ready
+dev_lead = None
+coder = None
+reviewer = None
+
+
+def _init_agents():
+    """Helper to initialize agents lazily."""
+    global dev_lead, coder, reviewer
+    if dev_lead is None:
+        dev_lead = DevLeadAgent()
+    if coder is None:
+        coder = CoderAgent()
+    if reviewer is None:
+        reviewer = ReviewerAgent()
 
 
 from langchain_core.runnables import RunnableConfig
@@ -20,18 +30,21 @@ from langchain_core.runnables import RunnableConfig
 async def dev_lead_node(state: AgentState, config: RunnableConfig):
     print("\n>>> [TEAM] DevLead executing...")
     logger.info("dev_lead_executing")
+    _init_agents()
     return await dev_lead(state, config)
 
 
 async def coder_node(state: AgentState, config: RunnableConfig):
     print(">>> [TEAM] Coder executing...")
     logger.info("coder_executing_in_team")
+    _init_agents()
     return await coder(state, config)
 
 
 async def reviewer_node(state: AgentState, config: RunnableConfig):
     print(">>> [TEAM] Reviewer executing...")
     logger.info("reviewer_executing_in_team")
+    _init_agents()
     return await reviewer(state, config)
 
 

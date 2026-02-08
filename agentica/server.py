@@ -1,5 +1,5 @@
 import os
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import aiosqlite
 from dotenv import load_dotenv
@@ -7,41 +7,65 @@ from dotenv import load_dotenv
 # Load environment variables FIRST
 load_dotenv(dotenv_path=".env")
 
-from fastapi import FastAPI, HTTPException
+from src.core.logger import configure_logger, get_logger
+
+# Configure logging before any other core imports
+configure_logger()
+logger = get_logger(__name__)
+
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, HTTPException, Query
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, StateGraph
 from pydantic import BaseModel
-
 from src.agents.data_agent import DataAgent
 from src.agents.research_agent import ResearchAgent
+from src.core.config import load_agent_config
 from src.core.consensus import consensus_manager
+from src.core.db_manager import db_manager
 from src.core.graph import AgentState
-from src.core.logger import configure_logger, get_logger
+from src.core.mcp import mcp_router
+from src.core.model_router import model_router
+from src.core.prompt_optimizer import optimizer
 from src.core.registry import tool_registry
 from src.core.supervisor import SupervisorAgent
 from src.core.teams import dev_team_node
 from src.core.usage import usage_tracker
 
-# Configure logging
-configure_logger()
-logger = get_logger(__name__)
+# Setup Persistence
+DATABASE_STATE_PATH = os.path.join(os.path.dirname(__file__), "data", "state.db")
 
-app = FastAPI(title="Agentic AI Enterprise Server")
 
-# Initialize Agents
-supervisor = SupervisorAgent()
-researcher = ResearchAgent()
-data_agent = DataAgent()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Initializes the database and refreshes all dynamic configurations."""
+    from src.core.config import refresh_agent_configs
 
-# Build Graph
-workflow = StateGraph(AgentState)
-workflow.add_node("SupervisorAgent", supervisor)
-workflow.add_node("ResearchAgent", researcher)
-workflow.add_node("DataAgent", data_agent)
-workflow.add_node("DevTeam", dev_team_node)
+    await db_manager.initialize()
+    await refresh_agent_configs()
+    await model_router.refresh_config()
+    await mcp_router.refresh_config()
 
-workflow.set_entry_point("SupervisorAgent")
+    global supervisor, researcher, data_agent
+    # Initialize agents (now they will use the DB cache)
+    supervisor = SupervisorAgent()
+    researcher = ResearchAgent()
+    data_agent = DataAgent()
+
+    # Rebuild and compile the graph with an active checkpointer
+    async with AsyncSqliteSaver.from_conn_string(DATABASE_STATE_PATH) as saver:
+        await build_graph(saver)
+        logger.info("server_dynamic_configs_initialized")
+        yield
+
+
+app = FastAPI(
+    title="Agentica Server",
+    description="Multi-Agent Orchestration System using LangGraph and MCP",
+    lifespan=lifespan,
+)
 
 
 # Error Analyzer Node for Self-Healing
@@ -83,9 +107,6 @@ def error_analyzer(state: AgentState):
     return {"next_agent": "JoinParallel"}
 
 
-workflow.add_node("ErrorAnalyzer", error_analyzer)
-
-
 # Human-In-The-Loop (HITL) Security Layer
 def hitl_gate(state: AgentState):
     """
@@ -124,13 +145,6 @@ def hitl_pause(state: AgentState):
     """
     logger.info("hitl_pause_executed_resuming_to_specials")
     return {}
-
-
-workflow.add_node("HITLGate", hitl_gate)
-workflow.add_node("HITLPause", hitl_pause)
-
-
-# Join Node for parallel synchronization
 
 
 def join_parallel(state: AgentState):
@@ -191,11 +205,6 @@ def consensus_node(state: AgentState):
     }
 
 
-workflow.add_node("JoinParallel", join_parallel)
-workflow.add_node("ConsensusNode", consensus_node)
-workflow.add_conditional_edges("ConsensusNode", lambda x: "SupervisorAgent")
-
-
 def supervisor_router(state):
     next_agent = state.get("next_agent", "FINISH")
     logger.info("supervisor_router_called", next_agent=next_agent)
@@ -218,13 +227,6 @@ def supervisor_router(state):
     return "HITLGate"
 
 
-workflow.add_conditional_edges(
-    "SupervisorAgent",
-    supervisor_router,
-    {"HITLGate": "HITLGate", "END": END},
-)
-
-
 def gate_router(state):
     next_agent = state.get("next_agent", "FINISH")
     intended_agent = state.get("intended_agent", next_agent)
@@ -237,19 +239,6 @@ def gate_router(state):
 
     # For autonomous flow, next_agent is already the specialist (string or list)
     return next_agent
-
-
-workflow.add_conditional_edges(
-    "HITLGate",
-    gate_router,
-    {
-        "HITLPause": "HITLPause",
-        "ResearchAgent": "ResearchAgent",
-        "DataAgent": "DataAgent",
-        "DevTeam": "DevTeam",
-        "FINISH": END,
-    },
-)
 
 
 def pause_router(state):
@@ -275,18 +264,6 @@ def pause_router(state):
     return intended_agent
 
 
-workflow.add_conditional_edges(
-    "HITLPause",
-    pause_router,
-    {
-        "ResearchAgent": "ResearchAgent",
-        "DataAgent": "DataAgent",
-        "DevTeam": "DevTeam",
-        "FINISH": END,
-    },
-)
-
-
 def worker_router(state):
     next_agent = state.get("next_agent", "END")
     logger.info("worker_router_called", next_agent=next_agent)
@@ -302,11 +279,6 @@ def worker_router(state):
     return result
 
 
-workflow.add_conditional_edges("ResearchAgent", worker_router)
-workflow.add_conditional_edges("DataAgent", worker_router)
-workflow.add_conditional_edges("DevTeam", worker_router)
-
-
 def error_router(state):
     next_agent = state.get("next_agent", "JoinParallel")
     logger.info("error_router_called", next_agent=next_agent)
@@ -317,13 +289,6 @@ def error_router(state):
 
     logger.info("error_router_returns", result=result)
     return result
-
-
-workflow.add_conditional_edges(
-    "ErrorAnalyzer",
-    error_router,
-    {"SupervisorAgent": "SupervisorAgent", "JoinParallel": "JoinParallel"},
-)
 
 
 def join_router(state):
@@ -341,19 +306,131 @@ def join_router(state):
     return "SupervisorAgent"
 
 
-workflow.add_conditional_edges(
-    "JoinParallel",
-    join_router,
-    {
-        "SupervisorAgent": "SupervisorAgent",
-        "ConsensusNode": "ConsensusNode",
-        "__end__": END,
-    },
-)
+async def build_graph(saver):
+    """Initializes agents and builds the LangGraph workflow."""
+    global supervisor, researcher, data_agent, workflow_app
+
+    # Initialize agents
+    supervisor = SupervisorAgent()
+    researcher = ResearchAgent()
+    data_agent = DataAgent()
+
+    # Build Graph
+    workflow = StateGraph(AgentState)
+    workflow.add_node("SupervisorAgent", supervisor)
+    workflow.add_node("ResearchAgent", researcher)
+    workflow.add_node("DataAgent", data_agent)
+    workflow.add_node("DevTeam", dev_team_node)
+
+    workflow.set_entry_point("SupervisorAgent")
+
+    # Nodes
+    workflow.add_node("ErrorAnalyzer", error_analyzer)
+    workflow.add_node("HITLGate", hitl_gate)
+    workflow.add_node("HITLPause", hitl_pause)
+    workflow.add_node("JoinParallel", join_parallel)
+    workflow.add_node("ConsensusNode", consensus_node)
+
+    # Edges
+    workflow.add_edge("ResearchAgent", "HITLGate")
+    workflow.add_edge("DataAgent", "HITLGate")
+    workflow.add_edge("DevTeam", "HITLGate")
+
+    # Conditional Edges
+    workflow.add_conditional_edges(
+        "SupervisorAgent",
+        supervisor_router,
+        {"HITLGate": "HITLGate", "END": END},
+    )
+
+    workflow.add_conditional_edges(
+        "HITLGate",
+        gate_router,
+        {
+            "HITLPause": "HITLPause",
+            "ResearchAgent": "ResearchAgent",
+            "DataAgent": "DataAgent",
+            "DevTeam": "DevTeam",
+            "FINISH": END,
+        },
+    )
+
+    workflow.add_conditional_edges(
+        "HITLPause",
+        pause_router,
+        {
+            "ResearchAgent": "ResearchAgent",
+            "DataAgent": "DataAgent",
+            "DevTeam": "DevTeam",
+            "FINISH": END,
+        },
+    )
+
+    workflow.add_conditional_edges("ResearchAgent", worker_router)
+    workflow.add_conditional_edges("DataAgent", worker_router)
+    workflow.add_conditional_edges("DevTeam", worker_router)
+
+    workflow.add_conditional_edges(
+        "ErrorAnalyzer",
+        error_router,
+        {"SupervisorAgent": "SupervisorAgent", "JoinParallel": "JoinParallel"},
+    )
+
+    workflow.add_conditional_edges(
+        "JoinParallel",
+        join_router,
+        {
+            "SupervisorAgent": "SupervisorAgent",
+            "ConsensusNode": "ConsensusNode",
+            "__end__": END,
+        },
+    )
+
+    workflow.add_conditional_edges("ConsensusNode", lambda x: "SupervisorAgent")
+
+    # Compile with persistence
+    memory = AsyncSqliteSaver.from_conn_string(DATABASE_STATE_PATH)
+    workflow_app = workflow.compile(checkpointer=saver, interrupt_before=["HITLPause"])
+    logger.info("graph_rebuilt_and_compiled")
 
 
 # Setup Persistence
-DB_PATH = os.path.join(os.path.dirname(__file__), "data", "state.db")
+DATABASE_STATE_PATH = os.path.join(os.path.dirname(__file__), "data", "state.db")
+
+
+class ModelConfigUpdate(BaseModel):
+    provider: str
+    tier: str
+    model: str
+
+
+class AgentModelUpdate(BaseModel):
+    model_provider: Optional[str] = None
+    model_tier: Optional[str] = None
+
+
+class MCPServerConfig(BaseModel):
+    name: str
+    type: str  # toolbox, sse
+    url: str
+    auth_token_env: Optional[str] = None
+
+
+class AgentCreate(BaseModel):
+    name: str
+    role: str
+    system_prompt: str
+    capabilities: List[str] = []
+    model_provider: str = "google"
+    model_tier: str = "fast"
+
+
+class AgentUpdate(BaseModel):
+    role: Optional[str] = None
+    system_prompt: Optional[str] = None
+    capabilities: Optional[List[str]] = None
+    model_provider: Optional[str] = None
+    model_tier: Optional[str] = None
 
 
 class RunRequest(BaseModel):
@@ -367,37 +444,33 @@ async def run_workflow(request: RunRequest):
         "received_request", thread_id=request.thread_id, message=request.message
     )
 
+    if not workflow_app:
+        raise HTTPException(
+            status_code=503, detail="Server is still initializing the graph..."
+        )
+
     config = {"configurable": {"thread_id": request.thread_id}}
     input_message = HumanMessage(content=request.message)
 
     final_output = []
 
     try:
-        # Use AsyncSqliteSaver as a context manager for each request
-        async with aiosqlite.connect(DB_PATH) as conn:
-            checkpointer = AsyncSqliteSaver(conn)
-            # Compile with interrupt on the HITL pause point
-            app_graph = workflow.compile(
-                checkpointer=checkpointer, interrupt_before=["HITLPause"]
-            )
-
-            async for event in app_graph.astream(
-                {
-                    "messages": [input_message],
-                    "plan": [],
-                    "plan_step": 0,
-                    "task_context": request.message,
-                    "wait_count": 0,
-                    "retry_data": {},
-                    "intended_agent": "",
-                    "require_consensus": False,
-                },
-                config,
-                stream_mode="values",
-            ):
-
-                if "messages" in event:
-                    final_output = event["messages"]
+        async for event in workflow_app.astream(
+            {
+                "messages": [input_message],
+                "plan": [],
+                "plan_step": 0,
+                "task_context": request.message,
+                "wait_count": 0,
+                "retry_data": {},
+                "intended_agent": "",
+                "require_consensus": False,
+            },
+            config,
+            stream_mode="values",
+        ):
+            if "messages" in event:
+                final_output = event["messages"]
     except Exception as e:
         logger.error("workflow_failed", error=str(e))
         import traceback
@@ -408,12 +481,9 @@ async def run_workflow(request: RunRequest):
     # Determine status based on snapshot
     status = "success"
     try:
-        async with aiosqlite.connect(DB_PATH) as conn:
-            checkpointer = AsyncSqliteSaver(conn)
-            app_graph = workflow.compile(checkpointer=checkpointer)
-            snapshot = await app_graph.aget_state(config)
-            if snapshot.next:
-                status = "requires_action"
+        snapshot = await workflow_app.aget_state(config)
+        if snapshot.next:
+            status = "requires_action"
     except Exception:
         pass
 
@@ -449,19 +519,19 @@ async def approve_workflow(request: RunRequest):
     logger.info("received_approval", thread_id=request.thread_id)
     config = {"configurable": {"thread_id": request.thread_id}}
 
+    if not workflow_app:
+        raise HTTPException(
+            status_code=503, detail="Server is still initializing the graph..."
+        )
+
     final_output = []
 
     try:
-        async with aiosqlite.connect(DB_PATH) as conn:
-            checkpointer = AsyncSqliteSaver(conn)
-            # Compile WITHOUT interrupt to allow full execution upon approval
-            app_graph = workflow.compile(checkpointer=checkpointer)
-
-            # Resume by passing None (triggered by state update or just resume)
-            # effectively continuing from the interruption.
-            async for event in app_graph.astream(None, config, stream_mode="values"):
-                if "messages" in event:
-                    final_output = event["messages"]
+        # Resume by passing None (triggered by state update or just resume)
+        # effectively continuing from the interruption.
+        async for event in workflow_app.astream(None, config, stream_mode="values"):
+            if "messages" in event:
+                final_output = event["messages"]
     except Exception as e:
         logger.error("approval_failed", error=str(e))
         raise HTTPException(status_code=500, detail=str(e))
@@ -513,22 +583,27 @@ def list_tools():
 @app.get("/state/{thread_id}")
 async def get_state(thread_id: str):
     """Retrieves the current workflow state for a thread."""
+    if not workflow_app:
+        raise HTTPException(status_code=503, detail="Server initializing...")
+
     config = {"configurable": {"thread_id": thread_id}}
-    async with aiosqlite.connect(DB_PATH) as conn:
-        checkpointer = AsyncSqliteSaver(conn)
-        app_graph = workflow.compile(checkpointer=checkpointer)
-        snapshot = await app_graph.aget_state(config)
+    try:
+        snapshot = await workflow_app.aget_state(config)
         return {
             "values": snapshot.values,
             "next": snapshot.next,
             "metadata": snapshot.metadata,
         }
+    except Exception as e:
+        logger.error("get_state_failed", thread_id=thread_id, error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/trajectories/{thread_id}")
 async def get_trajectories(thread_id: str):
     """Returns execution history for a thread."""
-    async with aiosqlite.connect(DB_PATH) as conn:
+    # Use DATABASE_STATE_PATH for trajectories
+    async with aiosqlite.connect(DATABASE_STATE_PATH) as conn:
         async with conn.execute(
             "SELECT agent_name, input, output, success, timestamp FROM trajectories WHERE thread_id = ? ORDER BY timestamp ASC",
             (thread_id,),
@@ -544,6 +619,201 @@ async def get_trajectories(thread_id: str):
                 }
                 for r in rows
             ]
+
+
+@app.get("/agents")
+async def list_agents():
+    """Returns metadata for all configured agents."""
+    try:
+        return await db_manager.get_all_agents()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/state/{thread_id}")
+async def delete_state(thread_id: str):
+    """Wipes state and checkpoints for a thread."""
+    async with aiosqlite.connect(DATABASE_STATE_PATH) as conn:
+        # Delete from LangGraph checkpointer tables
+        await conn.execute("DELETE FROM checkpoints WHERE thread_id = ?", (thread_id,))
+        await conn.execute("DELETE FROM writes WHERE thread_id = ?", (thread_id,))
+        # Delete from our trajectories table
+        await conn.execute("DELETE FROM trajectories WHERE thread_id = ?", (thread_id,))
+        await conn.commit()
+    return {"status": "deleted", "thread_id": thread_id}
+
+
+@app.get("/memory/search")
+async def search_memory(query: str = Query(...), k: int = 5):
+    """Searches long-term vector memory."""
+    if not researcher:
+        raise HTTPException(status_code=503, detail="Agents initializing...")
+    # DataAgent has the memory manager exposed or we can use the base special specialized ones
+    # For simplicity, we use the Researcher's memory manager as it is standard
+    results = researcher.memory.search_memory(query, k=k)
+    return {"query": query, "results": results}
+
+
+@app.get("/mcp/servers")
+def list_mcp_servers():
+    """Lists registered MCP servers and their status."""
+    return mcp_router.servers
+
+
+@app.post("/optimize/{agent_name}")
+async def optimize_agent(agent_name: str):
+    """Triggers prompt optimization for an agent based on failures."""
+    new_prompt = await optimizer.optimize_agent(agent_name)
+    if not new_prompt:
+        return {"status": "no_improvement_needed", "agent": agent_name}
+
+    optimizer.apply_optimization(agent_name, new_prompt)
+    return {
+        "status": "optimized",
+        "agent": agent_name,
+        "new_prompt_preview": new_prompt[:100] + "...",
+    }
+
+
+@app.get("/models/config")
+def get_model_config():
+    """Returns the current global tier-to-model mappings."""
+    return model_router.tier_mappings
+
+
+@app.post("/models/config")
+async def update_model_config(update: ModelConfigUpdate):
+    """Updates a global model mapping."""
+    await model_router.update_mapping(update.provider, update.tier, update.model)
+    return {"status": "updated", "config": model_router.tier_mappings}
+
+
+@app.patch("/agents/{agent_name}/model")
+async def update_agent_model(agent_name: str, update: AgentModelUpdate):
+    """Updates a specific agent's model provider and tier in the database."""
+    try:
+        agents = await db_manager.get_all_agents()
+        if agent_name not in agents:
+            raise HTTPException(status_code=404, detail=f"Agent {agent_name} not found")
+
+        agent_data = agents[agent_name]
+        if update.model_provider:
+            agent_data["model_provider"] = update.model_provider
+        if update.model_tier:
+            agent_data["model_tier"] = update.model_tier
+
+        await db_manager.set_agent(agent_name, agent_data)
+        return {"status": "updated", "agent": agent_name, "config": agent_data}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/config/secrets")
+async def get_secrets_status():
+    """Returns the status of known API keys (Set/Not Set). Values are masked."""
+    secrets = await db_manager.get_all_secrets()
+    keys = ["GOOGLE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "XAI_API_KEY"]
+    status = {}
+    for key in keys:
+        val = secrets.get(key)
+        if val:
+            # Mask: show first 4 and last 2 characters
+            masked = val[:4] + "..." + val[-2:] if len(val) > 6 else "****"
+            status[key] = {"set": True, "value": masked}
+        else:
+            status[key] = {"set": False, "value": None}
+    return status
+
+
+@app.post("/config/secrets")
+async def update_secrets(secrets: Dict[str, str]):
+    """Updates one or more API keys and persists them to DB."""
+    allowed_keys = [
+        "GOOGLE_API_KEY",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "XAI_API_KEY",
+    ]
+    for key, val in secrets.items():
+        if key not in allowed_keys:
+            raise HTTPException(status_code=400, detail=f"Invalid secret key: {key}")
+        await db_manager.set_secret(key, val)
+
+    # Refresh model router cache
+    await model_router.refresh_config()
+    return {"status": "updated", "keys": list(secrets.keys())}
+
+
+@app.post("/config/mcp")
+async def add_mcp_server(config: MCPServerConfig):
+    """Adds or updates an MCP server registry in the database."""
+    server_data = config.model_dump()
+    name = server_data.pop("name")
+    await mcp_router.add_server(name, server_data)
+    return {"status": "added", "server": name, "config": server_data}
+
+
+@app.delete("/config/mcp/{server_name}")
+async def delete_mcp_server(server_name: str):
+    """Removes an MCP server registry from the database."""
+    await mcp_router.delete_server(server_name)
+    return {"status": "deleted", "server": server_name}
+
+
+@app.get("/tools")
+def list_all_tools():
+    """Returns the complete catalog of registered tools."""
+    return tool_registry.list_tools()
+
+
+@app.post("/agents")
+async def create_agent(agent: AgentCreate):
+    """Creates a new agent and persists it to the database."""
+    try:
+        agents = await db_manager.get_all_agents()
+        if agent.name in agents:
+            raise HTTPException(
+                status_code=400, detail=f"Agent {agent.name} already exists"
+            )
+
+        await db_manager.set_agent(agent.name, agent.model_dump())
+        return {"status": "created", "agent": agent.name, "config": agent.model_dump()}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/agents/{agent_name}")
+async def update_agent_config(agent_name: str, update: AgentUpdate):
+    """Comprehensive update of an agent's configuration in the database."""
+    try:
+        agents = await db_manager.get_all_agents()
+        if agent_name not in agents:
+            raise HTTPException(status_code=404, detail=f"Agent {agent_name} not found")
+
+        agent_data = agents[agent_name]
+        update_dict = update.model_dump(exclude_unset=True)
+
+        for key, value in update_dict.items():
+            agent_data[key] = value
+
+        await db_manager.set_agent(agent_name, agent_data)
+        return {"status": "updated", "agent": agent_name, "config": agent_data}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/agents/{agent_name}")
+async def delete_agent(agent_name: str):
+    """Removes an agent from the database."""
+    try:
+        agents = await db_manager.get_all_agents()
+        if agent_name not in agents:
+            raise HTTPException(status_code=404, detail=f"Agent {agent_name} not found")
+
+        await db_manager.delete_agent(agent_name)
+        return {"status": "deleted", "agent": agent_name}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 if __name__ == "__main__":

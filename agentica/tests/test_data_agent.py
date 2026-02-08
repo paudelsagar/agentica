@@ -1,11 +1,11 @@
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from src.agents.data_agent import DataAgent
 
 
 # Dummy config class to satisfy Pydantic/BaseModel requirements if needed,
-# or just a simple class that EnterpriseAgent can use.
+# or just a simple class that Agentica can use.
 class DummyConfig:
     def __init__(self):
         self.name = "DataAgent"
@@ -35,7 +35,7 @@ async def test_data_agent_tool_loading(mock_config):
     with patch("src.agents.data_agent.load_agent_config", return_value=mock_config):
         agent = DataAgent()
 
-        # Mock attach_mcp_server (which is on the base class EnterpriseAgent)
+        # Mock attach_mcp_server (which is on the base class Agentica)
         with patch.object(
             DataAgent, "attach_mcp_server", new_callable=AsyncMock
         ) as mock_attach:
@@ -55,7 +55,7 @@ async def test_data_agent_call_triggers_loading(mock_config):
         with patch.object(
             agent, "_load_toolbox_tools", new_callable=AsyncMock
         ) as mock_load, patch(
-            "src.core.agent.EnterpriseAgent.__call__", new_callable=AsyncMock
+            "src.core.agent.Agentica.__call__", new_callable=AsyncMock
         ) as mock_super_call:
 
             mock_super_call.return_value = {"messages": [], "next_agent": "FINISH"}

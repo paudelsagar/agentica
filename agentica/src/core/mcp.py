@@ -1,7 +1,4 @@
-import os
 from typing import Any, Dict, List, Optional
-
-import yaml
 
 from src.core.logger import get_logger
 
@@ -26,22 +23,44 @@ class MCPRouter:
         if self._initialized:
             return
 
-        self.config_path = os.path.join(os.getcwd(), "src/config/mcp_servers.yaml")
-        self.servers = self._load_config()
+        self.servers = {}
         self._initialized = True
 
-    def _load_config(self) -> Dict[str, Any]:
-        if not os.path.exists(self.config_path):
-            logger.warning("mcp_servers_config_not_found", path=self.config_path)
-            return {}
-
+    async def refresh_config(self):
+        """Loads or reloads server configurations from the database."""
         try:
-            with open(self.config_path, "r") as f:
-                data = yaml.safe_load(f)
-                return data.get("mcp_servers", {})
+            from src.core.db_manager import db_manager
+
+            self.servers = await db_manager.get_mcp_servers()
+            logger.info("mcp_config_loaded_from_db")
         except Exception as e:
-            logger.error("failed_to_load_mcp_config", error=str(e))
-            return {}
+            logger.error("failed_to_load_mcp_config_from_db", error=str(e))
+            self.servers = {}
+
+    async def add_server(self, name: str, config: Dict[str, Any]):
+        """Adds or updates an MCP server configuration and persists it to DB."""
+        self.servers[name] = config
+        try:
+            from src.core.db_manager import db_manager
+
+            await db_manager.set_mcp_server(name, config)
+            logger.info("mcp_server_added_to_db", name=name)
+        except Exception as e:
+            logger.error("failed_to_save_mcp_config_to_db", error=str(e))
+
+    async def delete_server(self, name: str):
+        """Removes an MCP server configuration and persists it to DB."""
+        if name in self.servers:
+            del self.servers[name]
+            try:
+                from src.core.db_manager import db_manager
+
+                await db_manager.delete_mcp_server(name)
+                logger.info("mcp_server_deleted_from_db", name=name)
+            except Exception as e:
+                logger.error("failed_to_delete_mcp_config_from_db", error=str(e))
+        else:
+            logger.warning("mcp_server_not_found_for_deletion", name=name)
 
     async def fetch_tools(self, server_name: str) -> List[Any]:
         """

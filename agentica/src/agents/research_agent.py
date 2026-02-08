@@ -1,17 +1,18 @@
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
-from src.core.agent import EnterpriseAgent
+from src.core.agent import Agentica, AgenticaConfig
 from src.core.config import load_agent_config
 from src.core.memory import MemoryManager
 
 
-class ResearchAgent(EnterpriseAgent):
+class ResearchAgent(Agentica):
     """
-    Agent specialized in research tasks.
+    Specialized in searching the web and summarizing information.
     """
 
-    def __init__(self):
-        config = load_agent_config("ResearchAgent")
+    def __init__(self, config: Optional[AgenticaConfig] = None):
+        if config is None:
+            config = load_agent_config("ResearchAgent")
         super().__init__(config)
         self._register_tools()
 

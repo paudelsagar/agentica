@@ -1,10 +1,9 @@
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from langchain_anthropic import ChatAnthropic
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
-
 from src.core.logger import get_logger
 
 logger = get_logger(__name__)
@@ -15,28 +14,48 @@ class ModelRouter:
     Manages dynamic LLM selection based on tiers (heavy, fast) or specific names.
     """
 
-    # Default mappings for Google (primary provider)
-    TIER_MAPPINGS = {
-        "google": {
-            "heavy": "gemini-2.0-flash",  # "gemini-2.0-pro-exp-02-05" when stable, currently flash is very capable
-            "fast": "gemini-2.0-flash",
-        },
-        "openai": {
-            "heavy": "gpt-4o",
-            "fast": "gpt-4o-mini",
-        },
-        "anthropic": {
-            "heavy": "claude-3-5-sonnet-latest",
-            "fast": "claude-3-haiku-20240307",
-        },
-        "xai": {
-            "heavy": "grok-beta",
-            "fast": "grok-beta",
-        },
-    }
+    def __init__(self):
+        self.tier_mappings = {}
+        self.secrets_cache = {}
 
-    @staticmethod
-    def get_model(tier_or_name: str, provider: str = "google", temperature: float = 0):
+    async def refresh_config(self):
+        """Loads or reloads tier mappings and secrets from the database."""
+        try:
+            from src.core.db_manager import db_manager
+
+            self.tier_mappings = await db_manager.get_model_mappings()
+            self.secrets_cache = await db_manager.get_all_secrets()
+            logger.info("model_router_config_loaded_from_db")
+        except Exception as e:
+            logger.error("failed_to_load_model_config_from_db", error=str(e))
+            # Fallback to hardcoded defaults if critical
+            self.tier_mappings = {
+                "google": {"heavy": "gemini-2.0-flash", "fast": "gemini-2.0-flash"}
+            }
+
+    async def update_mapping(self, provider: str, tier: str, model: str):
+        """Updates a mapping and persists it to the database."""
+        provider = provider.lower()
+        tier = tier.lower()
+
+        if provider not in self.tier_mappings:
+            self.tier_mappings[provider] = {}
+
+        self.tier_mappings[provider][tier] = model
+
+        try:
+            from src.core.db_manager import db_manager
+
+            await db_manager.set_model_mapping(provider, tier, model)
+            logger.info(
+                "model_router_config_updated_in_db", provider=provider, tier=tier
+            )
+        except Exception as e:
+            logger.error("failed_to_save_model_config_to_db", error=str(e))
+
+    def get_model(
+        self, tier_or_name: str, provider: str = "google", temperature: float = 0
+    ):
         """
         Returns a ChatModel instance based on tier/name and provider.
         """
@@ -45,9 +64,9 @@ class ModelRouter:
 
         # Resolve tier to model name if possible
         model_name = tier_or_name
-        if provider in ModelRouter.TIER_MAPPINGS:
-            if tier_or_name in ModelRouter.TIER_MAPPINGS[provider]:
-                model_name = ModelRouter.TIER_MAPPINGS[provider][tier_or_name]
+        if provider in self.tier_mappings:
+            if tier_or_name in self.tier_mappings[provider]:
+                model_name = self.tier_mappings[provider][tier_or_name]
 
         logger.info(
             "routing_model",
@@ -57,25 +76,31 @@ class ModelRouter:
         )
 
         if provider == "google":
-            api_key = os.getenv("GOOGLE_API_KEY")
+            api_key = self.secrets_cache.get("GOOGLE_API_KEY") or os.getenv(
+                "GOOGLE_API_KEY"
+            )
             if not api_key:
                 logger.warning("missing_google_api_key")
             return ChatGoogleGenerativeAI(model=model_name, temperature=temperature)
 
         elif provider == "openai":
-            api_key = os.getenv("OPENAI_API_KEY")
+            api_key = self.secrets_cache.get("OPENAI_API_KEY") or os.getenv(
+                "OPENAI_API_KEY"
+            )
             if not api_key:
                 logger.warning("missing_openai_api_key")
             return ChatOpenAI(model=model_name, temperature=temperature)
 
         elif provider == "anthropic":
-            api_key = os.getenv("ANTHROPIC_API_KEY")
+            api_key = self.secrets_cache.get("ANTHROPIC_API_KEY") or os.getenv(
+                "ANTHROPIC_API_KEY"
+            )
             if not api_key:
                 logger.warning("missing_anthropic_api_key")
             return ChatAnthropic(model=model_name, temperature=temperature)
 
         elif provider == "xai":
-            api_key = os.getenv("XAI_API_KEY")
+            api_key = self.secrets_cache.get("XAI_API_KEY") or os.getenv("XAI_API_KEY")
             if not api_key:
                 logger.warning("missing_xai_api_key")
             return ChatOpenAI(
@@ -109,7 +134,7 @@ class ModelRouter:
 
             async with aiosqlite.connect(db_path) as db:
                 # Check average latency for the 'fast' model of this provider
-                fast_model = self.TIER_MAPPINGS.get(provider, {}).get("fast", "fast")
+                fast_model = self.tier_mappings.get(provider, {}).get("fast", "fast")
                 async with db.execute(
                     """
                     SELECT AVG(execution_time_ms) FROM token_usage 

@@ -1,13 +1,17 @@
 import re
 from typing import Any, Dict, List, Literal, Optional
 
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import AIMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 from pydantic import BaseModel
-from src.core.agent import EnterpriseAgent
+from src.core.agent import Agentica, AgenticaConfig
 from src.core.config import load_agent_config
+from src.core.consensus import Vote
+from src.core.logger import get_logger
 from src.core.registry import tool_registry
 from src.core.usage import usage_tracker
+
+logger = get_logger(__name__)
 
 
 class NextStep(BaseModel):
@@ -16,13 +20,17 @@ class NextStep(BaseModel):
     ]
 
 
-class SupervisorAgent(EnterpriseAgent):
+class SupervisorAgent(Agentica):
     """
-    Supervisor Agent that orchestrates the workflow by deciding the next worker.
+    Orchestrates the workflow by deciding the next agent or step.
     """
 
-    def __init__(self):
-        config = load_agent_config("SupervisorAgent")
+    def __init__(self, config: Optional[AgenticaConfig] = None):
+        """
+        Supervisor Agent that orchestrates the workflow by deciding the next worker.
+        """
+        if config is None:
+            config = load_agent_config("SupervisorAgent")
         super().__init__(config)
 
     async def __call__(
@@ -186,6 +194,7 @@ class SupervisorAgent(EnterpriseAgent):
 
         except Exception as e:
             self.log.error("supervisor_decision_failed", error=str(e))
+            response = AIMessage(content=f"Error: {str(e)}")
             next_agent = ["FINISH"]
             wait_count = 0
 

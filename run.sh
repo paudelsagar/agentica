@@ -1,37 +1,40 @@
 #!/bin/bash
 
-mkdir -p .pids logs
+# Get the absolute path to the project root
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-PID_FILE="./.pids/server.pid"
-LOG_FILE="./.pids/server.log"
+# Ensure centralized directories exist at project root
+mkdir -p "$ROOT_DIR/.pids" "$ROOT_DIR/logs"
+
+PID_FILE="$ROOT_DIR/.pids/server.pid"
+LOG_FILE="$ROOT_DIR/logs/server.log"
 PORT=8000
 
-TOOLBOX_PID_FILE="./logs/toolbox.pid"
-TOOLBOX_LOG_FILE="./logs/toolbox.log"
+TOOLBOX_PID_FILE="$ROOT_DIR/.pids/toolbox.pid"
+TOOLBOX_LOG_FILE="$ROOT_DIR/logs/toolbox.log"
 TOOLBOX_PORT=5005
 
 
 start_toolbox() {
-    if [ -f "$TOOLBOX_PID_FILE" ]; then
-        if ps -p $(cat "$TOOLBOX_PID_FILE") > /dev/null 2>&1; then
-            echo "Toolbox is already running (PID: $(cat "$TOOLBOX_PID_FILE"))"
-            return
-        else
-            rm "$TOOLBOX_PID_FILE"
-        fi
+    if [ -f "$TOOLBOX_PID_FILE" ] && ps -p $(cat "$TOOLBOX_PID_FILE") > /dev/null 2>&1; then
+        echo "Toolbox is already running (PID: $(cat "$TOOLBOX_PID_FILE"))"
+        return
     fi
 
     echo "Starting Toolbox server on port $TOOLBOX_PORT..."
     # Load SQLITE_DATABASE from .env if it exists
-    if [ -f "agentica/.env" ]; then
-        export $(grep -v '^#' agentica/.env | xargs)
+    if [ -f "$ROOT_DIR/agentica/.env" ]; then
+        # Export env variables correctly
+        set -a
+        source "$ROOT_DIR/agentica/.env"
+        set +a
     fi
     export SQLITE_DATABASE=${SQLITE_DATABASE:-"data/chinook.db"}
 
-    cd agentica
-    nohup npx -y @toolbox-sdk/server --prebuilt sqlite --port $TOOLBOX_PORT > "logs/toolbox.log" 2>&1 &
-    echo $! > "logs/toolbox.pid"
-    cd ..
+    cd "$ROOT_DIR/agentica"
+    nohup npx -y @toolbox-sdk/server --prebuilt sqlite --port $TOOLBOX_PORT > "$TOOLBOX_LOG_FILE" 2>&1 &
+    echo $! > "$TOOLBOX_PID_FILE"
+    cd "$ROOT_DIR"
 
     echo "Toolbox started (PID: $(cat "$TOOLBOX_PID_FILE"))"
 }
@@ -52,26 +55,21 @@ stop_toolbox() {
 
 start() {
     start_toolbox
-    if [ -f "$PID_FILE" ]; then
-        if ps -p $(cat "$PID_FILE") > /dev/null 2>&1; then
-            echo "Server is already running (PID: $(cat "$PID_FILE"))"
-            exit 1
-        else
-            echo "Found stale PID file. Removing..."
-            rm "$PID_FILE"
-        fi
+    if [ -f "$PID_FILE" ] && ps -p $(cat "$PID_FILE") > /dev/null 2>&1; then
+        echo "Server is already running (PID: $(cat "$PID_FILE"))"
+        exit 1
     fi
 
     echo "Starting server..."
-    if [ -d ".venv" ]; then
-        source .venv/bin/activate
+    if [ -d "$ROOT_DIR/.venv" ]; then
+        source "$ROOT_DIR/.venv/bin/activate"
     fi
-    # Run uvicorn in background
-    cd agentica
-    export PYTHONPATH=$PYTHONPATH:.
-    nohup uvicorn server:app --port $PORT > "logs/server.log" 2>&1 &
-    echo $! > "logs/server.pid"
-    cd ..
+    
+    cd "$ROOT_DIR/agentica"
+    export PYTHONPATH="$ROOT_DIR/agentica:$PYTHONPATH"
+    nohup uvicorn server:app --host 0.0.0.0 --port $PORT --log-level info > "$LOG_FILE" 2>&1 &
+    echo $! > "$PID_FILE"
+    cd "$ROOT_DIR"
     
     echo "Server started (PID: $(cat "$PID_FILE"))"
     echo "Logs are being written to $LOG_FILE"

@@ -1,17 +1,14 @@
 import pytest
 from fastapi.testclient import TestClient
-
 from server import app
 
-client = TestClient(app)
 
-
-def test_root():
+def test_root(client):
     response = client.get("/")
     assert response.status_code == 404  # Assuming no root endpoint defined yet
 
 
-def test_run_endpoint_basic():
+def test_run_endpoint_basic(client):
     # Test a simple query
     payload = {"thread_id": "test_thread_123", "message": "Hello, are you there?"}
     response = client.post("/run", json=payload)

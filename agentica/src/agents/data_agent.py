@@ -1,20 +1,20 @@
 from typing import Any, Dict, List, Optional
 
 from langchain_core.runnables import RunnableConfig
-
-from src.core.agent import EnterpriseAgent
+from src.core.agent import Agentica, AgenticaConfig
 from src.core.config import load_agent_config
 
 # MCP tool loading is now handled by the base class via MCPRouter
 
 
-class DataAgent(EnterpriseAgent):
+class DataAgent(Agentica):
     """
-    Data Agent that interacts with SQL databases via Google GenAI Toolbox.
+    Agent specialized in data analysis using the Google GenAI Toolbox.
     """
 
-    def __init__(self):
-        config = load_agent_config("DataAgent")
+    def __init__(self, config: Optional[AgenticaConfig] = None):
+        if config is None:
+            config = load_agent_config("DataAgent")
         super().__init__(config)
         self._tools_loaded = False
 

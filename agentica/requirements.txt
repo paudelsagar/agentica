@@ -18,7 +18,6 @@ chromadb
 toolbox-core
 
 structlog
-pyyaml
 pytest
 pytest-asyncio
 pytest-cov

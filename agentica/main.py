@@ -4,7 +4,6 @@ import os
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage
 from langgraph.graph import END, StateGraph
-
 from src.agents.coder_agent import CoderAgent
 from src.agents.research_agent import ResearchAgent
 from src.core.graph import AgentState
@@ -14,7 +13,7 @@ load_dotenv()
 
 
 async def main():
-    print("Initializing Enterprise Agentic System with LangGraph & LLMs...")
+    print("Initializing Agentica System with LangGraph & LLMs...")
 
     # Instantiate Agents (Nodes)
     # They now use LLMs configured in their __init__

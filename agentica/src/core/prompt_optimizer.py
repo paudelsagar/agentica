@@ -3,9 +3,7 @@ import os
 from typing import Any, Dict, List, Optional
 
 import aiosqlite
-import yaml
-
-from src.core.config import AGENTS_CONFIG_PATH
+from src.core.db_manager import db_manager
 from src.core.logger import get_logger
 from src.core.model_router import model_router
 
@@ -64,11 +62,18 @@ class PromptOptimizer:
             logger.info("no_negatives_found_skipping_optimization", agent=agent_name)
             return None
 
-        # Load current prompt
-        with open(AGENTS_CONFIG_PATH, "r") as f:
-            config = yaml.safe_load(f)
+        # Load current agent configuration from database
+        try:
+            agents = await db_manager.get_all_agents()
+            if agent_name not in agents:
+                logger.error("agent_not_found_for_optimization", agent=agent_name)
+                return None
+            agent_data = agents[agent_name]
+        except Exception as e:
+            logger.error("failed_to_fetch_agent_data_for_optimization", error=str(e))
+            return None
 
-        current_prompt = config["agents"][agent_name].get("system_prompt", "")
+        current_prompt = agent_data.get("system_prompt", "")
 
         # Format negatives for the optimizer LLM
         trajectory_str = ""
@@ -82,7 +87,7 @@ class PromptOptimizer:
         optimization_instruction = f"""
 You are a Meta-Prompt Engineer. Your goal is to analyze failures in an AI agent's performance and refine its SYSTEM PROMPT.
 
-AGENT ROLE: {config['agents'][agent_name].get('role')}
+AGENT ROLE: {agent_data.get('role')}
 CURRENT SYSTEM PROMPT:
 {current_prompt}
 
@@ -111,19 +116,27 @@ Return ONLY the new full system prompt. Do not include any explanation or marker
         new_prompt = response.content.strip()
         return new_prompt
 
-    def apply_optimization(self, agent_name: str, new_prompt: str):
+    async def apply_optimization(self, agent_name: str, new_prompt: str):
         """
-        Updates agents.yaml with the new prompt.
+        Updates the agent's system prompt in the database and refreshes the cache.
         """
-        with open(AGENTS_CONFIG_PATH, "r") as f:
-            config = yaml.safe_load(f)
+        try:
+            from src.core.config import refresh_agent_configs
 
-        config["agents"][agent_name]["system_prompt"] = new_prompt
+            agents = await db_manager.get_all_agents()
+            if agent_name not in agents:
+                logger.error("agent_not_found_to_apply_optimization", agent=agent_name)
+                return
 
-        with open(AGENTS_CONFIG_PATH, "w") as f:
-            yaml.dump(config, f, sort_keys=False)
+            agent_data = agents[agent_name]
+            agent_data["system_prompt"] = new_prompt
 
-        logger.info("optimization_applied", agent=agent_name)
+            await db_manager.set_agent(agent_name, agent_data)
+            await refresh_agent_configs()
+
+            logger.info("optimization_applied", agent=agent_name)
+        except Exception as e:
+            logger.error("failed_to_apply_optimization", error=str(e))
 
 
 optimizer = PromptOptimizer()
