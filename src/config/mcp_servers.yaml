@@ -1,0 +1,45 @@
+mcp_servers:
+  Toolbox:
+    type: "toolbox"
+    url: "http://localhost:5005"
+  GitHub:
+    type: "sse"
+    url: "http://localhost:8001"
+    auth_token_env: "GITHUB_TOKEN"
+  Jira:
+    type: "sse"
+    url: "http://localhost:8002"
+    auth_token_env: "JIRA_API_KEY"
+  Teams:
+    type: "sse"
+    url: "http://localhost:8003"
+    auth_token_env: "TEAMS_API_TOKEN"
+  GitLab:
+    type: "sse"
+    url: "http://localhost:8004"
+    auth_token_env: "GITLAB_API_KEY"
+  Gmail:
+    type: "sse"
+    url: "http://localhost:8005"
+    auth_token_env: "GMAIL_CLIENT_SECRET"
+  Outlook:
+    type: "sse"
+    url: "http://localhost:8006"
+    auth_token_env: "MS_GRAPH_TOKEN"
+  GoogleDrive:
+    type: "sse"
+    url: "http://localhost:8007"
+    auth_token_env: "GOOGLE_DRIVE_CREDENTIALS"
+  SharePoint:
+    type: "sse"
+    url: "http://localhost:8008"
+    auth_token_env: "SHAREPOINT_CLIENT_SECRET"
+  GoogleMeet:
+    type: "sse"
+    url: "http://localhost:8009"
+    auth_token_env: "GOOGLE_MEET_API_KEY"
+
+
+
+
+

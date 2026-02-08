@@ -1,0 +1,19 @@
+
+kind: sources
+name: chinook-db
+type: sqlite
+path: data/chinook.db
+---
+kind: tools
+name: list_users
+type: sqlite-sql
+source: chinook-db
+description: "Lists all users from the database."
+statement: "SELECT * FROM users;"
+---
+kind: tools
+name: count_users
+type: sqlite-sql
+source: chinook-db
+description: "Counts total number of users."
+statement: "SELECT COUNT(*) as count FROM users;"

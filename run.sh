@@ -1,10 +1,53 @@
 #!/bin/bash
 
-PID_FILE="server.pid"
-LOG_FILE="server.log"
+PID_FILE="logs/server.pid"
+LOG_FILE="logs/server.log"
 PORT=8000
 
+TOOLBOX_PID_FILE="logs/toolbox.pid"
+TOOLBOX_LOG_FILE="logs/toolbox.log"
+TOOLBOX_PORT=5005
+
+
+start_toolbox() {
+    if [ -f "$TOOLBOX_PID_FILE" ]; then
+        if ps -p $(cat "$TOOLBOX_PID_FILE") > /dev/null 2>&1; then
+            echo "Toolbox is already running (PID: $(cat "$TOOLBOX_PID_FILE"))"
+            return
+        else
+            rm "$TOOLBOX_PID_FILE"
+        fi
+    fi
+
+    echo "Starting Toolbox server on port $TOOLBOX_PORT..."
+    # Load SQLITE_DATABASE from .env if it exists
+    if [ -f ".env" ]; then
+        export $(grep -v '^#' .env | xargs)
+    fi
+    export SQLITE_DATABASE=${SQLITE_DATABASE:-"data/chinook.db"}
+
+    nohup npx -y @toolbox-sdk/server --prebuilt sqlite --port $TOOLBOX_PORT > "$TOOLBOX_LOG_FILE" 2>&1 &
+    echo $! > "$TOOLBOX_PID_FILE"
+
+    echo "Toolbox started (PID: $(cat "$TOOLBOX_PID_FILE"))"
+}
+
+stop_toolbox() {
+    if [ -f "$TOOLBOX_PID_FILE" ]; then
+        PID=$(cat "$TOOLBOX_PID_FILE")
+        if ps -p $PID > /dev/null 2>&1; then
+            echo "Stopping Toolbox server (PID: $PID)..."
+            kill $PID
+            rm "$TOOLBOX_PID_FILE"
+            echo "Toolbox stopped"
+        else
+            rm "$TOOLBOX_PID_FILE"
+        fi
+    fi
+}
+
 start() {
+    start_toolbox
     if [ -f "$PID_FILE" ]; then
         if ps -p $(cat "$PID_FILE") > /dev/null 2>&1; then
             echo "Server is already running (PID: $(cat "$PID_FILE"))"
@@ -29,7 +72,9 @@ start() {
 }
 
 stop() {
+    stop_toolbox
     if [ ! -f "$PID_FILE" ]; then
+
         echo "Server is not running (no PID file found)"
         # Check if process exists anyway matching uvicorn
         if pgrep -f "uvicorn backend.server:app" > /dev/null; then

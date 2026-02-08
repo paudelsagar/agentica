@@ -40,3 +40,5 @@ workspace/
 # IDEs
 .vscode/
 .idea/
+logs/*.log
+logs/*.pid

@@ -67,6 +67,7 @@ class MemoryManager:
         logger.info("searching_memory", query=query)
         try:
             results = self.vector_store.similarity_search(query, k=k)
+            logger.info("memory_search_results", count=len(results))
             return [doc.page_content for doc in results]
         except Exception as e:
             logger.error("search_memory_failed", error=str(e))

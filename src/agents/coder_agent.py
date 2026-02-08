@@ -3,6 +3,7 @@ from typing import Any, Dict
 
 from src.core.agent import EnterpriseAgent
 from src.core.config import load_agent_config
+from src.core.tool_manager import ToolManager
 
 WORKSPACE_DIR = os.path.join(os.getcwd(), "workspace")
 os.makedirs(WORKSPACE_DIR, exist_ok=True)
@@ -16,7 +17,17 @@ class CoderAgent(EnterpriseAgent):
     def __init__(self):
         config = load_agent_config("CoderAgent")
         super().__init__(config)
+        self.tool_manager = ToolManager()
         self._register_tools()
+        self._load_dynamic_tools()
+
+    def _load_dynamic_tools(self):
+        """Loads and registers dynamic tools."""
+        dynamic_tools = self.tool_manager.load_tools()
+        for tool in dynamic_tools:
+            # Assuming tool is a callable with a 'name' attribute (like StructuredTool or @tool decorated function)
+            if hasattr(tool, "name"):
+                self.register_tool(tool.name, tool)
 
     def _register_tools(self):
         def write_code(filename: str, content: str) -> str:
@@ -64,18 +75,37 @@ class CoderAgent(EnterpriseAgent):
             except Exception as e:
                 return f"Error executing file: {str(e)}"
 
-        def review_code(code: str) -> str:
+        def create_tool(filename: str, content: str) -> str:
             """
-            Simulates reviewing code.
+            Creates a new tool for the agent system.
+            The content MUST be valid Python code defining a function decorated with @tool.
+            filename should end with .py
             """
-            return "Code Review: Looks good, no syntax errors found."
+            if not filename.endswith(".py"):
+                return "Error: Filename must end with .py"
 
-        # Manually register tools for LangChain binding
-        self.tool_functions["write_code"] = write_code
-        self.tool_functions["execute_code"] = execute_code
-        self.tool_functions["review_code"] = review_code
+            # Security check: basic validation, though we are in a sandbox-ish environment.
+            # In a real enterprise system, stricter checks would be needed.
 
-        # Register with FastMCP
-        self.mcp_server.add_tool(write_code)
-        self.mcp_server.add_tool(execute_code)
-        self.mcp_server.add_tool(review_code)
+            try:
+                # Write to dynamic tools directory
+                import src.core.tool_manager as tm
+
+                file_path = os.path.join(
+                    tm.DYNAMIC_TOOLS_DIR, os.path.basename(filename)
+                )
+
+                with open(file_path, "w") as f:
+                    f.write(content)
+
+                # Hot-reload: Refresh tools and re-register
+                self._load_dynamic_tools()
+
+                return f"Successfully created tool at {file_path}. Tool has been reloaded and is ready to use."
+            except Exception as e:
+                return f"Error creating tool: {str(e)}"
+
+        # Manually register tools for LangChain binding and Global Registry
+        self.register_tool("write_code", write_code)
+        self.register_tool("execute_code", execute_code)
+        self.register_tool("create_tool", create_tool)
