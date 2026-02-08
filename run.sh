@@ -1,11 +1,13 @@
 #!/bin/bash
 
-PID_FILE="logs/server.pid"
-LOG_FILE="logs/server.log"
+mkdir -p .pids logs
+
+PID_FILE="./.pids/server.pid"
+LOG_FILE="./.pids/server.log"
 PORT=8000
 
-TOOLBOX_PID_FILE="logs/toolbox.pid"
-TOOLBOX_LOG_FILE="logs/toolbox.log"
+TOOLBOX_PID_FILE="./logs/toolbox.pid"
+TOOLBOX_LOG_FILE="./logs/toolbox.log"
 TOOLBOX_PORT=5005
 
 
@@ -21,13 +23,15 @@ start_toolbox() {
 
     echo "Starting Toolbox server on port $TOOLBOX_PORT..."
     # Load SQLITE_DATABASE from .env if it exists
-    if [ -f ".env" ]; then
-        export $(grep -v '^#' .env | xargs)
+    if [ -f "agentica/.env" ]; then
+        export $(grep -v '^#' agentica/.env | xargs)
     fi
     export SQLITE_DATABASE=${SQLITE_DATABASE:-"data/chinook.db"}
 
-    nohup npx -y @toolbox-sdk/server --prebuilt sqlite --port $TOOLBOX_PORT > "$TOOLBOX_LOG_FILE" 2>&1 &
-    echo $! > "$TOOLBOX_PID_FILE"
+    cd agentica
+    nohup npx -y @toolbox-sdk/server --prebuilt sqlite --port $TOOLBOX_PORT > "logs/toolbox.log" 2>&1 &
+    echo $! > "logs/toolbox.pid"
+    cd ..
 
     echo "Toolbox started (PID: $(cat "$TOOLBOX_PID_FILE"))"
 }
@@ -63,10 +67,12 @@ start() {
         source .venv/bin/activate
     fi
     # Run uvicorn in background
-    nohup uvicorn server:app --port $PORT > "$LOG_FILE" 2>&1 &
+    cd agentica
+    export PYTHONPATH=$PYTHONPATH:.
+    nohup uvicorn server:app --port $PORT > "logs/server.log" 2>&1 &
+    echo $! > "logs/server.pid"
+    cd ..
     
-    # Save PID
-    echo $! > "$PID_FILE"
     echo "Server started (PID: $(cat "$PID_FILE"))"
     echo "Logs are being written to $LOG_FILE"
 }
@@ -77,7 +83,7 @@ stop() {
 
         echo "Server is not running (no PID file found)"
         # Check if process exists anyway matching uvicorn
-        if pgrep -f "uvicorn backend.server:app" > /dev/null; then
+        if pgrep -f "uvicorn server:app" > /dev/null; then
              echo "Warning: PID file missing but uvicorn process found. Manual cleanup required."
         fi
         return

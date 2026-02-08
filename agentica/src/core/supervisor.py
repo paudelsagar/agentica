@@ -4,7 +4,6 @@ from typing import Any, Dict, List, Literal, Optional
 from langchain_core.messages import SystemMessage
 from langchain_core.runnables import RunnableConfig
 from pydantic import BaseModel
-
 from src.core.agent import EnterpriseAgent
 from src.core.config import load_agent_config
 from src.core.registry import tool_registry
@@ -77,6 +76,9 @@ class SupervisorAgent(EnterpriseAgent):
         messages = [system_msg] + messages
 
         self.log.info("supervisor_deciding_next_step", step=plan_step)
+        next_agent = ["FINISH"]
+        wait_count = 0
+        require_consensus = False
 
         try:
             response = await self.llm.ainvoke(messages, config=config)

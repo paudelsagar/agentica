@@ -8,4 +8,7 @@ fi
 
 # Run pytest with coverage
 echo "Running tests with coverage report..."
+cd agentica
+export PYTHONPATH=$PYTHONPATH:.
 python3 -m pytest --cov=src --cov-report=term-missing tests/
+cd ..

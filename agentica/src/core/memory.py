@@ -4,7 +4,6 @@ from typing import List, Optional
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
-
 from src.core.logger import get_logger
 
 logger = get_logger(__name__)
@@ -28,7 +27,9 @@ class MemoryManager:
 
         # Persist directory
         self.persist_directory = os.path.join(
-            os.path.dirname(os.path.dirname(__file__)), "data", "chroma_db"
+            os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+            "data",
+            "chroma_db",
         )
 
         try:
