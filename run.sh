@@ -13,6 +13,10 @@ PORT=8000
 TOOLBOX_PID_FILE="$ROOT_DIR/.pids/toolbox.pid"
 TOOLBOX_LOG_FILE="$ROOT_DIR/logs/toolbox.log"
 TOOLBOX_PORT=5005
+ 
+DASHBOARD_PID_FILE="$ROOT_DIR/.pids/dashboard.pid"
+DASHBOARD_LOG_FILE="$ROOT_DIR/logs/dashboard.log"
+DASHBOARD_DIR="$ROOT_DIR/dashboard"
 
 
 start_toolbox() {
@@ -52,9 +56,41 @@ stop_toolbox() {
         fi
     fi
 }
-
+ 
+start_dashboard() {
+    if [ -f "$DASHBOARD_PID_FILE" ] && ps -p $(cat "$DASHBOARD_PID_FILE") > /dev/null 2>&1; then
+        echo "Dashboard is already running (PID: $(cat "$DASHBOARD_PID_FILE"))"
+        return
+    fi
+ 
+    echo "Starting Dashboard on port 3000..."
+    cd "$DASHBOARD_DIR"
+    nohup npx next dev --webpack > "$DASHBOARD_LOG_FILE" 2>&1 &
+    echo $! > "$DASHBOARD_PID_FILE"
+    cd "$ROOT_DIR"
+ 
+    echo "Dashboard started (PID: $(cat "$DASHBOARD_PID_FILE"))"
+}
+ 
+stop_dashboard() {
+    if [ -f "$DASHBOARD_PID_FILE" ]; then
+        PID=$(cat "$DASHBOARD_PID_FILE")
+        if ps -p $PID > /dev/null 2>&1; then
+            echo "Stopping Dashboard (PID: $PID)..."
+            # npm run dev starts child processes, we need to kill the process group or children
+            pkill -P $PID
+            kill $PID
+            rm "$DASHBOARD_PID_FILE"
+            echo "Dashboard stopped"
+        else
+            rm "$DASHBOARD_PID_FILE"
+        fi
+    fi
+}
+ 
 start() {
     start_toolbox
+    start_dashboard
     if [ -f "$PID_FILE" ] && ps -p $(cat "$PID_FILE") > /dev/null 2>&1; then
         echo "Server is already running (PID: $(cat "$PID_FILE"))"
         exit 1
@@ -77,6 +113,7 @@ start() {
 
 stop() {
     stop_toolbox
+    stop_dashboard
     if [ ! -f "$PID_FILE" ]; then
 
         echo "Server is not running (no PID file found)"
@@ -120,6 +157,17 @@ status() {
         else
             echo "Server is stopped"
         fi
+    fi
+ 
+    if [ -f "$DASHBOARD_PID_FILE" ]; then
+        PID=$(cat "$DASHBOARD_PID_FILE")
+        if ps -p $PID > /dev/null 2>&1; then
+            echo "Dashboard: Running (PID: $PID)"
+        else
+            echo "Dashboard: Stopped (stale PID)"
+        fi
+    else
+        echo "Dashboard: Stopped"
     fi
 }
 

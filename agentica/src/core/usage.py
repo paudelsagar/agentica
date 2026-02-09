@@ -1,9 +1,8 @@
 import os
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import aiosqlite
-
 from src.core.logger import get_logger
 
 logger = get_logger(__name__)
@@ -161,23 +160,41 @@ class UsageTracker:
             logger.error("failed_to_get_usage", error=str(e))
             return 0
 
-    async def get_metrics(self) -> Dict[str, Any]:
+    async def get_metrics(
+        self, start_time: Optional[datetime] = None, end_time: Optional[datetime] = None
+    ) -> Dict[str, Any]:
         """
-        Returns aggregated performance metrics per agent.
+        Returns aggregated performance metrics per agent, optionally filtered by time.
         """
         try:
             await self.initialize()
+
+            where_clauses = ["1=1"]
+            params = []
+
+            if start_time:
+                where_clauses.append("timestamp >= ?")
+                params.append(start_time.isoformat())
+
+            if end_time:
+                where_clauses.append("timestamp <= ?")
+                params.append(end_time.isoformat())
+
+            where_sql = " AND ".join(where_clauses)
+
             async with aiosqlite.connect(self.db_path) as db:
                 async with db.execute(
-                    """
+                    f"""
                     SELECT 
                         agent_name, 
                         COUNT(*) as call_count,
                         SUM(total_tokens) as total_tokens,
                         AVG(execution_time_ms) as avg_latency_ms
                     FROM token_usage 
+                    WHERE {where_sql}
                     GROUP BY agent_name
-                    """
+                    """,
+                    params,
                 ) as cursor:
                     rows = await cursor.fetchall()
                     metrics = {}
@@ -191,6 +208,157 @@ class UsageTracker:
         except Exception as e:
             logger.error("failed_to_get_metrics", error=str(e))
             return {}
+
+    async def get_usage_history(
+        self,
+        interval: str = "day",
+        limit: int = 100,
+        agent_name: Optional[str] = None,
+        model_name: Optional[str] = None,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Returns token usage history grouped by time interval.
+        Supports filtering by agent_name, model_name, and time range.
+        """
+        try:
+            await self.initialize()
+
+            # Determine time formatting based on interval
+            if interval == "minute":
+                time_format = "%Y-%m-%d %H:%M"
+            elif interval == "hour":
+                time_format = "%Y-%m-%d %H:00"
+            elif interval == "week":
+                time_format = "%Y-%W"
+            elif interval == "month":
+                time_format = "%Y-%m"
+            else:  # day
+                time_format = "%Y-%m-%d"
+
+            where_clauses = ["1=1"]
+            params = []
+
+            if agent_name:
+                where_clauses.append("agent_name = ?")
+                params.append(agent_name)
+
+            if model_name:
+                where_clauses.append("model_name = ?")
+                params.append(model_name)
+
+            if start_time:
+                where_clauses.append("timestamp >= ?")
+                params.append(start_time.isoformat())
+
+            if end_time:
+                where_clauses.append("timestamp <= ?")
+                params.append(end_time.isoformat())
+
+            where_sql = " AND ".join(where_clauses)
+
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute(
+                    f"""
+                    SELECT 
+                        strftime('{time_format}', timestamp) as bucket,
+                        SUM(total_tokens) as total 
+                    FROM token_usage 
+                    WHERE {where_sql}
+                    GROUP BY bucket
+                    ORDER BY bucket DESC
+                    LIMIT ?
+                    """,
+                    params + [limit],
+                ) as cursor:
+                    rows = await cursor.fetchall()
+                    # Reverse to show oldest to newest
+                    return [{"timestamp": r[0], "tokens": r[1]} for r in reversed(rows)]
+        except Exception as e:
+            logger.error("failed_to_get_usage_history", error=str(e))
+            return []
+
+    async def get_token_usage_by_model(
+        self, start_time: Optional[datetime] = None, end_time: Optional[datetime] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Returns total token usage grouped by model name, optionally filtered by time.
+        """
+        try:
+            await self.initialize()
+
+            where_clauses = ["model_name IS NOT NULL AND model_name != ''"]
+            params = []
+
+            if start_time:
+                where_clauses.append("timestamp >= ?")
+                params.append(start_time.isoformat())
+
+            if end_time:
+                where_clauses.append("timestamp <= ?")
+                params.append(end_time.isoformat())
+
+            where_sql = " AND ".join(where_clauses)
+
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute(
+                    f"""
+                    SELECT model_name, SUM(total_tokens) as total 
+                    FROM token_usage 
+                    WHERE {where_sql}
+                    GROUP BY model_name
+                    ORDER BY total DESC
+                    """,
+                    params,
+                ) as cursor:
+                    rows = await cursor.fetchall()
+                    return [{"model": r[0], "tokens": r[1]} for r in rows]
+        except Exception as e:
+            logger.error("failed_to_get_token_usage_by_model", error=str(e))
+            return []
+
+    async def get_recent_trajectories(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """
+        Returns the most recent trajectories (unique threads) with their latest status.
+        """
+        try:
+            await self.initialize()
+            async with aiosqlite.connect(self.db_path) as db:
+                # Get distinct threads with their latest timestamp
+                async with db.execute(
+                    """
+                    SELECT 
+                        t1.thread_id,
+                        t1.agent_name,
+                        t1.input,
+                        t1.success,
+                        t1.timestamp
+                    FROM trajectories t1
+                    INNER JOIN (
+                        SELECT thread_id, MAX(timestamp) as max_ts
+                        FROM trajectories
+                        GROUP BY thread_id
+                    ) t2 ON t1.thread_id = t2.thread_id AND t1.timestamp = t2.max_ts
+                    ORDER BY t1.timestamp DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ) as cursor:
+                    rows = await cursor.fetchall()
+                    return [
+                        {
+                            "thread_id": r[0],
+                            "agent": r[1],
+                            "preview": r[2][:100] + "..." if r[2] else "",
+                            "success": bool(r[3]),
+                            "timestamp": r[4],
+                        }
+                        for r in rows
+                    ]
+        except Exception as e:
+            logger.error("failed_to_get_recent_trajectories", error=str(e))
+            return []
 
 
 class LoadMonitor:

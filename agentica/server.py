@@ -2,6 +2,7 @@ import os
 from typing import Any, Dict, List, Optional
 
 import aiosqlite
+from datetime import datetime
 from dotenv import load_dotenv
 
 # Load environment variables FIRST
@@ -16,6 +17,7 @@ logger = get_logger(__name__)
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, StateGraph
@@ -65,6 +67,14 @@ app = FastAPI(
     title="Agentica Server",
     description="Multi-Agent Orchestration System using LangGraph and MCP",
     lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
@@ -565,9 +575,36 @@ def health_check():
 
 
 @app.get("/metrics")
-async def get_metrics():
-    """Returns aggregated performance metrics."""
-    return await usage_tracker.get_metrics()
+async def get_metrics(
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+):
+    """Returns aggregated performance metrics, optionally filtered by time."""
+    return await usage_tracker.get_metrics(start_date, end_date)
+
+
+@app.get("/metrics/history")
+async def get_metrics_history(
+    interval: str = Query("day", regex="^(minute|hour|day|week|month)$"),
+    limit: int = 100,
+    agent_name: Optional[str] = None,
+    model_name: Optional[str] = None,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+):
+    """Returns historical token usage grouped by interval, optionally filtered."""
+    return await usage_tracker.get_usage_history(
+        interval, limit, agent_name, model_name, start_date, end_date
+    )
+
+
+@app.get("/metrics/by-model")
+async def get_metrics_by_model(
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+):
+    """Returns token usage grouped by model, optionally filtered by time."""
+    return await usage_tracker.get_token_usage_by_model(start_date, end_date)
 
 
 @app.get("/tools")
@@ -597,6 +634,12 @@ async def get_state(thread_id: str):
     except Exception as e:
         logger.error("get_state_failed", thread_id=thread_id, error=str(e))
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/trajectories/recent")
+async def get_recent_trajectories(limit: int = 10):
+    """Returns the most recent trajectories (unique threads)."""
+    return await usage_tracker.get_recent_trajectories(limit)
 
 
 @app.get("/trajectories/{thread_id}")
