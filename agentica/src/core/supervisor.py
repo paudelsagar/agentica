@@ -90,8 +90,17 @@ class SupervisorAgent(Agentica):
 
         try:
             response = await self.llm.ainvoke(messages, config=config)
+            response.name = self.config.name  # Set agent name for history
             content = response.content
             self.log.info("supervisor_raw_response", content=content)
+
+            # 3. Extract parts: SUMMARY, PLAN, NEXT AGENT
+            summary_match = re.search(
+                r"SUMMARY:(.*?)(?=\[END_SUMMARY\]|PLAN:|$)",
+                content,
+                re.DOTALL | re.IGNORECASE,
+            )
+            summary = summary_match.group(1).strip() if summary_match else ""
 
             # 3. Automated Reflection: Store info in memory
             await self._reflect_and_store(messages, content)
@@ -120,8 +129,7 @@ class SupervisorAgent(Agentica):
                     total_tokens=usage.get("total_tokens", 0),
                 )
 
-            # 2. Extract Plan if it's the first turn or if LLM proposes a new plan
-            # Look for "PLAN:" block
+            # Extract Plan
             new_plan = []
             if "PLAN:" in content.upper():
                 plan_match = re.search(
@@ -136,10 +144,9 @@ class SupervisorAgent(Agentica):
                     plan = new_plan
                     plan_step = 0  # reset if plan changed
 
-            # 3. Multi-agent parsing for Parallel Execution
+            # Multi-agent parsing
             content_upper = content.upper()
             next_agent = ["FINISH"]
-            # Look for all NEXT AGENT: lines (support multiple lines or comma-separated)
             agent_matches = re.findall(r"NEXT AGENT:\s*(.*)", content, re.IGNORECASE)
 
             if agent_matches:
@@ -178,25 +185,48 @@ class SupervisorAgent(Agentica):
                 elif "DATAAGENT" in content_upper:
                     next_agent = ["DataAgent"]
 
+            # Use summary if available for the final message to user
+            if summary:
+                response.content = summary
+
             # 4. Critical Decision Check (Phase 17)
-            # Consensus is required if "CRITICAL" is mentioned AND multiple agents are assigned.
             require_consensus = "CRITICAL" in content_upper and len(next_agent) > 1
 
-            # Increment plan step if not finished and not just generating a plan
-            # Increment plan step if not finished
+            # Increment plan step
             if next_agent != ["FINISH"]:
                 plan_step += 1
 
-            # Initialize wait_count for the JoinParallel node
-            # If we are finishing or no agents launched, wait_count is 0.
-            # Otherwise, it's the number of agents launched.
             wait_count = len(next_agent) if next_agent != ["FINISH"] else 0
 
         except Exception as e:
-            self.log.error("supervisor_decision_failed", error=str(e))
-            response = AIMessage(content=f"Error: {str(e)}")
+            error_msg = str(e)
+            self.log.error("supervisor_decision_failed", error=error_msg)
+            response = AIMessage(content=f"Error: {error_msg}", name=self.config.name)
             next_agent = ["FINISH"]
             wait_count = 0
+
+        # Record Trajectory
+        thread_id = (
+            config.get("configurable", {}).get("thread_id", "unknown")
+            if config
+            else "unknown"
+        )
+        last_input = ""
+        if messages and len(messages) > 1:
+            # message[0] is often system prompt we added above
+            # the original messages were at the end of the list after our system prompt insertion
+            # wait, messages = [system_msg] + messages (line 84)
+            # so original last message is messages[-1]
+            last_input = str(messages[-1].content)
+
+        await usage_tracker.record_trajectory(
+            thread_id=thread_id,
+            agent_name=self.config.name,
+            input_text=last_input,
+            output_text=response.content,
+            success=True if "Error:" not in response.content else False,
+            feedback=response.content if "Error:" in response.content else "",
+        )
 
         self.log.info(
             "supervisor_decision",

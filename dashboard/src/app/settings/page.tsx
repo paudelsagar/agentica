@@ -10,7 +10,7 @@ function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
-const PROVIDERS = ["google", "openai", "anthropic", "cohere"];
+const PROVIDERS = ["google", "openai", "anthropic", "xai", "ollama"];
 const TIERS = ["fast", "heavy"];
 
 export default function SettingsPage() {
@@ -62,15 +62,15 @@ export default function SettingsPage() {
         </button>
       </div>
 
-      <div className="max-w-4xl space-y-12">
+      <div className="max-w-6xl space-y-12">
         {/* Model Tier Mapping */}
         <section className="space-y-6">
           <div className="flex items-center gap-3">
             <Zap className="h-6 w-6 text-indigo-500" />
             <h2 className="text-xl font-bold text-foreground">Model Tier Mapping</h2>
           </div>
-
-          <div className="grid grid-cols-1 gap-6">
+ 
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             {PROVIDERS.map(provider => (
               <div key={provider} className="p-6 rounded-2xl bg-card border border-border shadow-sm space-y-6">
                 <div className="flex items-center gap-3">
@@ -79,8 +79,8 @@ export default function SettingsPage() {
                   </div>
                   <h3 className="text-lg font-bold text-foreground capitalize">{provider}</h3>
                 </div>
-
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+ 
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   {TIERS.map(tier => (
                     <div key={tier} className="space-y-2">
                       <div className="flex items-center justify-between">
@@ -89,7 +89,7 @@ export default function SettingsPage() {
                           "text-[10px] font-bold uppercase px-1.5 py-0.5 rounded",
                           tier === "fast" ? "text-emerald-500 bg-emerald-500/10" : "text-amber-500 bg-amber-500/10"
                         )}>
-                          {tier === "fast" ? "Latency Optimized" : "Capability Optimized"}
+                          {tier === "fast" ? "FAST" : "HEAVY"}
                         </span>
                       </div>
                       <div className="relative">
@@ -113,14 +113,14 @@ export default function SettingsPage() {
             ))}
           </div>
         </section>
-
+ 
         {/* System Info */}
         <section className="space-y-6 p-8 rounded-2xl bg-card border border-border shadow-sm">
           <div className="flex items-center gap-3">
             <Settings className="h-6 w-6 text-indigo-500" />
             <h2 className="text-xl font-bold text-foreground">General Information</h2>
           </div>
-          <div className="grid grid-cols-2 gap-8">
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-8">
             <div>
                <p className="text-xs font-bold text-foreground/40 uppercase tracking-widest mb-1">Backend Connectivity</p>
                <p className="text-foreground font-medium">WebSocket & REST Active</p>

@@ -11,9 +11,21 @@ DEFAULT_AGENTS = {
         "name": "ResearchAgent",
         "role": "Researcher",
         "capabilities": ["web_search", "summarization"],
-        "model_provider": "openai",
+        "model_provider": "google",
         "model_tier": "heavy",
-        "system_prompt": "You are a senior researcher. ALWAYS use the 'web_search' tool to find real-time information or answer general questions. DO NOT apologize or say you cannot fetch data; just use the tool. If you receive an 'ALERT:' message, it means your previous tool call failed; analyze the error and try again. If you need coding or database access, tell the Supervisor.",
+        "system_prompt": """You are a senior researcher. ALWAYS use the 'web_search' tool to find real-time information or answer general questions.
+
+CRITICAL: To communicate with the user, you MUST use the 'respond_to_user' tool.
+- ONLY content sent via respond_to_user() will be shown to the user
+- All other output (your reasoning, planning, tool results) is hidden from the user
+- Synthesize information into clear, helpful responses before calling respond_to_user()
+
+EXAMPLE WORKFLOW:
+1. Use web_search to find information
+2. Analyze and synthesize the results
+3. Call respond_to_user("Here's what I found: [your summary]")
+
+Do NOT include raw JSON, tool output, or internal notes in respond_to_user - only the final user-friendly message.""",
     },
     "CoderAgent": {
         "name": "CoderAgent",
@@ -61,7 +73,24 @@ DEFAULT_AGENTS = {
         "capabilities": ["Task Delegation", "Workflow Orchestration"],
         "model_provider": "google",
         "model_tier": "heavy",
-        "system_prompt": "You are the Project Manager and Lead Architect. Break down requests into a multi-step PLAN. Delegate to ResearchAgent, DevTeam, or DataAgent. Launch multiple agents in parallel if independent tasks exist.",
+        "system_prompt": """You are the Project Manager and Lead Architect. Your role is to coordinate other agents.
+You MUST NOT attempt to use tools directly (e.g., do not write 'web_search(...)'). Instead, delegate tasks.
+
+CRITICAL: To communicate with the user, you MUST use the 'respond_to_user' tool.
+- Call respond_to_user("Brief, friendly status update") to inform the user
+- All other output (planning, reasoning) is hidden from the user
+
+Your internal planning should follow this format (hidden from user):
+PLAN: [numbered list of steps]
+NEXT AGENT: [AgentName] (ResearchAgent, DevTeam, DataAgent, or FINISH)
+
+EXAMPLE:
+First, call: respond_to_user("I'll check the current Bitcoin price for you.")
+Then internally plan:
+PLAN:
+1. Delegate to ResearchAgent for price lookup
+2. Report results to user
+NEXT AGENT: ResearchAgent""",
     },
 }
 
@@ -70,9 +99,10 @@ DEFAULT_MODEL_MAPPINGS = {
         "fast": "claude-3-haiku-20240307",
         "heavy": "claude-3-5-sonnet-latest",
     },
-    "google": {"fast": "gemini-2.0-flash", "heavy": "dummy-heavy-model"},
+    "google": {"fast": "gemini-2.0-flash", "heavy": "gemini-2.0-flash"},
     "openai": {"fast": "gpt-4o-mini", "heavy": "gpt-4o"},
     "xai": {"fast": "grok-beta", "heavy": "grok-beta"},
+    "ollama": {"fast": "llama3.2", "heavy": "llama3.1"},
 }
 
 DEFAULT_MCP_SERVERS = {
@@ -80,47 +110,47 @@ DEFAULT_MCP_SERVERS = {
     "GitHub": {
         "type": "sse",
         "url": "http://localhost:8001",
-        "auth_token_env": "GITHUB_TOKEN",
+        "auth_token": "",
     },
     "Jira": {
         "type": "sse",
         "url": "http://localhost:8002",
-        "auth_token_env": "JIRA_API_KEY",
+        "auth_token": "",
     },
     "Teams": {
         "type": "sse",
         "url": "http://localhost:8003",
-        "auth_token_env": "TEAMS_API_TOKEN",
+        "auth_token": "",
     },
     "GitLab": {
         "type": "sse",
         "url": "http://localhost:8004",
-        "auth_token_env": "GITLAB_API_KEY",
+        "auth_token": "",
     },
     "Gmail": {
         "type": "sse",
         "url": "http://localhost:8005",
-        "auth_token_env": "GMAIL_CLIENT_SECRET",
+        "auth_token": "",
     },
     "Outlook": {
         "type": "sse",
         "url": "http://localhost:8006",
-        "auth_token_env": "MS_GRAPH_TOKEN",
+        "auth_token": "",
     },
     "GoogleDrive": {
         "type": "sse",
         "url": "http://localhost:8007",
-        "auth_token_env": "GOOGLE_DRIVE_CREDENTIALS",
+        "auth_token": "",
     },
     "SharePoint": {
         "type": "sse",
         "url": "http://localhost:8008",
-        "auth_token_env": "SHAREPOINT_CLIENT_SECRET",
+        "auth_token": "",
     },
     "GoogleMeet": {
         "type": "sse",
         "url": "http://localhost:8009",
-        "auth_token_env": "GOOGLE_MEET_API_KEY",
+        "auth_token": "",
     },
 }
 
@@ -155,7 +185,6 @@ async def seed():
             "OPENAI_API_KEY",
             "ANTHROPIC_API_KEY",
             "XAI_API_KEY",
-            "TOOLBOX_URL",
         ]
         for key in secrets:
             val = os.getenv(key)

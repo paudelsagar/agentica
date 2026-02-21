@@ -16,6 +16,8 @@ const secretKeys = [
   { key: "ANTHROPIC_API_KEY", label: "Anthropic", provider: "anthropic" },
   { key: "COHERE_API_KEY", label: "Cohere", provider: "cohere" },
   { key: "TAVILY_API_KEY", label: "Tavily Search", provider: "tavily" },
+  { key: "XAI_API_KEY", label: "xAI (Grok)", provider: "xai" },
+  { key: "OLLAMA_BASE_URL", label: "Ollama URL", provider: "ollama" },
 ];
 
 export default function SecretsPage() {
@@ -89,7 +91,7 @@ export default function SecretsPage() {
         </button>
       </div>
 
-      <div className="max-w-4xl space-y-6">
+      <div className="max-w-6xl space-y-6">
         <div className="p-6 rounded-2xl bg-amber-500/10 border border-amber-500/20 flex gap-4 items-start">
           <ShieldAlert className="h-6 w-6 text-amber-500 shrink-0" />
           <div>
@@ -98,20 +100,29 @@ export default function SecretsPage() {
           </div>
         </div>
 
-        <div className="grid grid-cols-1 gap-4">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           {secretKeys.map((item) => (
-            <div key={item.key} className="p-6 rounded-2xl bg-card border border-border flex flex-col md:flex-row md:items-center gap-6 group hover:bg-accent/5 transition-all shadow-sm">
-              <div className="flex items-center gap-4 md:w-64 shrink-0">
-                <div className="h-10 w-10 rounded-lg bg-indigo-500/10 flex items-center justify-center border border-indigo-500/20 text-indigo-500">
-                  <Key className="h-5 w-5" />
+            <div key={item.key} className="p-6 rounded-2xl bg-card border border-border flex flex-col gap-4 group hover:bg-accent/5 transition-all shadow-sm">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-4">
+                  <div className="h-10 w-10 rounded-lg bg-indigo-500/10 flex items-center justify-center border border-indigo-500/20 text-indigo-500">
+                    <Key className="h-5 w-5" />
+                  </div>
+                  <div>
+                    <h4 className="font-bold text-foreground leading-tight">{item.label}</h4>
+                    <code className="text-[10px] text-foreground/40 uppercase tracking-tighter">{item.key}</code>
+                  </div>
                 </div>
-                <div>
-                  <h4 className="font-bold text-foreground leading-tight">{item.label}</h4>
-                  <code className="text-[10px] text-foreground/40 uppercase tracking-tighter">{item.key}</code>
-                </div>
+                
+                {serverStatus[item.key]?.set && (
+                  <div className="flex items-center gap-2 text-emerald-500 text-[10px] font-bold uppercase">
+                    <CheckCircle2 className="h-3.5 w-3.5" />
+                    <span>Configured</span>
+                  </div>
+                )}
               </div>
 
-              <div className="flex-1 relative">
+              <div className="relative">
                 <input 
                   type={visibleKeys[item.key] ? "text" : "password"} 
                   value={formValues[item.key] || ""}
@@ -130,15 +141,6 @@ export default function SecretsPage() {
                 >
                   {visibleKeys[item.key] ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                 </button>
-              </div>
-
-              <div className="flex items-center gap-2 shrink-0 md:w-32 justify-end">
-                {serverStatus[item.key]?.set && (
-                  <div className="flex items-center gap-2 text-emerald-500 text-xs font-bold uppercase">
-                    <CheckCircle2 className="h-4 w-4" />
-                    <span>Configured</span>
-                  </div>
-                )}
               </div>
             </div>
           ))}

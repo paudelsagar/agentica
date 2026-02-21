@@ -2,7 +2,7 @@
 
 import { api } from "@/lib/api";
 import { clsx, type ClassValue } from "clsx";
-import { Activity, Cpu, Globe, Link as LinkIcon, Plus, Trash2 } from "lucide-react";
+import { Activity, Cpu, Eye, EyeOff, Globe, Link as LinkIcon, Plus, Save, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { twMerge } from "tailwind-merge";
 
@@ -10,17 +10,33 @@ function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
+interface ServerEditState {
+  [key: string]: { url: string; auth_token: string; showToken: boolean };
+}
+
 export default function MCPPage() {
   const [servers, setServers] = useState<any[]>([]);
   const [isModalOpen, setIsModalOpen] = useState(false);
-  const [newServer, setNewServer] = useState({ name: "", type: "sse", url: "" });
+  const [newServer, setNewServer] = useState({ name: "", type: "sse", url: "", auth_token: "" });
   const [isLoading, setIsLoading] = useState(true);
+  const [editState, setEditState] = useState<ServerEditState>({});
 
   const fetchServers = async () => {
     setIsLoading(true);
     try {
       const data = await api.getMCPServers();
-      setServers(Object.values(data));
+      const serverList = Object.values(data) as any[];
+      setServers(serverList);
+      // Initialize edit state for each server
+      const initState: ServerEditState = {};
+      serverList.forEach((server: any) => {
+        initState[server.name] = {
+          url: server.url || "",
+          auth_token: server.auth_token || "",
+          showToken: false,
+        };
+      });
+      setEditState(initState);
     } catch (error) {
       console.error("Failed to fetch MCP servers:", error);
     } finally {
@@ -35,7 +51,18 @@ export default function MCPPage() {
   const handleAdd = async () => {
     await api.addMCPServer(newServer);
     setIsModalOpen(false);
-    setNewServer({ name: "", type: "sse", url: "" });
+    setNewServer({ name: "", type: "sse", url: "", auth_token: "" });
+    fetchServers();
+  };
+
+  const handleUpdate = async (server: any) => {
+    const edit = editState[server.name];
+    await api.addMCPServer({
+      name: server.name,
+      type: server.type,
+      url: edit.url,
+      auth_token: edit.auth_token,
+    });
     fetchServers();
   };
 
@@ -72,7 +99,14 @@ export default function MCPPage() {
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           {servers.map((server) => (
             <div key={server.name} className="agent-card group bg-card border border-border shadow-sm hover:bg-accent/5 transition-all">
-              <div className="absolute top-0 right-0 p-4 opacity-0 group-hover:opacity-100 transition-opacity">
+              <div className="absolute top-0 right-0 p-4 flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                <button 
+                  onClick={() => handleUpdate(server)}
+                  className="p-2 rounded-lg bg-emerald-500/10 text-emerald-500 hover:bg-emerald-500/20 transition-colors"
+                  title="Save changes"
+                >
+                  <Save className="h-4 w-4" />
+                </button>
                 <button 
                   onClick={() => handleDelete(server.name)}
                   className="p-2 rounded-lg bg-destructive/10 text-destructive hover:bg-destructive/20 transition-colors"
@@ -103,13 +137,44 @@ export default function MCPPage() {
               </div>
 
               <div className="mt-6 space-y-3">
-                <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-accent/20 border border-border overflow-hidden">
+                {/* Editable URL */}
+                <div className="flex items-center gap-2">
                   <LinkIcon className="h-3.5 w-3.5 text-foreground/40 shrink-0" />
-                  <span className="text-sm text-foreground/60 truncate font-mono">{server.url}</span>
+                  <input
+                    type="text"
+                    value={editState[server.name]?.url || ""}
+                    onChange={(e) => setEditState({
+                      ...editState,
+                      [server.name]: { ...editState[server.name], url: e.target.value }
+                    })}
+                    className="flex-1 bg-accent/20 border border-border rounded-lg px-3 py-1.5 text-sm text-foreground font-mono focus:border-indigo-500/50 focus:ring-0 transition-all"
+                    placeholder="Endpoint URL"
+                  />
                 </div>
-                <div className="flex items-center gap-2 text-foreground/40 text-xs">
-                  <Globe className="h-3.5 w-3.5" />
-                  <span>Connection stable</span>
+                
+                {/* Editable Token with show/hide */}
+                <div className="flex items-center gap-2">
+                  <Globe className="h-3.5 w-3.5 text-foreground/40 shrink-0" />
+                  <input
+                    type={editState[server.name]?.showToken ? "text" : "password"}
+                    value={editState[server.name]?.auth_token || ""}
+                    onChange={(e) => setEditState({
+                      ...editState,
+                      [server.name]: { ...editState[server.name], auth_token: e.target.value }
+                    })}
+                    className="flex-1 bg-accent/20 border border-border rounded-lg px-3 py-1.5 text-sm text-foreground font-mono focus:border-indigo-500/50 focus:ring-0 transition-all"
+                    placeholder="API Token (optional)"
+                  />
+                  <button
+                    onClick={() => setEditState({
+                      ...editState,
+                      [server.name]: { ...editState[server.name], showToken: !editState[server.name]?.showToken }
+                    })}
+                    className="p-1.5 rounded-lg bg-accent/30 text-foreground/60 hover:bg-accent/50 transition-colors"
+                    title={editState[server.name]?.showToken ? "Hide token" : "Show token"}
+                  >
+                    {editState[server.name]?.showToken ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                  </button>
                 </div>
               </div>
             </div>
@@ -165,6 +230,17 @@ export default function MCPPage() {
                     value={newServer.url}
                     onChange={e => setNewServer({...newServer, url: e.target.value})}
                     placeholder="http://localhost:1234/sse"
+                    className="w-full bg-accent/20 border border-border rounded-xl px-4 py-3 text-foreground focus:border-indigo-500/50 focus:ring-0 transition-all font-mono"
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-xs font-bold text-foreground/40 uppercase tracking-widest">API Token (optional)</label>
+                  <input 
+                    type="password" 
+                    value={newServer.auth_token}
+                    onChange={e => setNewServer({...newServer, auth_token: e.target.value})}
+                    placeholder="Bearer token or API key"
                     className="w-full bg-accent/20 border border-border rounded-xl px-4 py-3 text-foreground focus:border-indigo-500/50 focus:ring-0 transition-all font-mono"
                   />
                 </div>

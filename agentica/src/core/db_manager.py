@@ -53,10 +53,11 @@ class DatabaseManager:
                     name TEXT PRIMARY KEY,
                     type TEXT,
                     url TEXT,
-                    auth_token_env TEXT
+                    auth_token TEXT
                 )
             """
             )
+
             await db.execute(
                 """
                 CREATE TABLE IF NOT EXISTS secrets (
@@ -65,6 +66,23 @@ class DatabaseManager:
                 )
             """
             )
+
+            # Migration: Rename auth_token_env to auth_token if the old column exists
+            try:
+                cursor = await db.execute("PRAGMA table_info(mcp_servers)")
+                columns = await cursor.fetchall()
+                column_names = [col[1] for col in columns]
+                if (
+                    "auth_token_env" in column_names
+                    and "auth_token" not in column_names
+                ):
+                    await db.execute(
+                        "ALTER TABLE mcp_servers RENAME COLUMN auth_token_env TO auth_token"
+                    )
+                    logger.info("migrated_auth_token_env_to_auth_token")
+            except Exception as e:
+                logger.warning("migration_skipped", error=str(e))
+
             await db.commit()
         logger.info("database_initialized", path=self.db_path)
 
@@ -140,10 +158,10 @@ class DatabaseManager:
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
                 """
-                INSERT OR REPLACE INTO mcp_servers (name, type, url, auth_token_env)
+                INSERT OR REPLACE INTO mcp_servers (name, type, url, auth_token)
                 VALUES (?, ?, ?, ?)
             """,
-                (name, data.get("type"), data.get("url"), data.get("auth_token_env")),
+                (name, data.get("type"), data.get("url"), data.get("auth_token")),
             )
             await db.commit()
 

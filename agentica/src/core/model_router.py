@@ -3,6 +3,7 @@ from typing import Any, Dict, List, Optional
 
 from langchain_anthropic import ChatAnthropic
 from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_ollama import ChatOllama
 from langchain_openai import ChatOpenAI
 from src.core.logger import get_logger
 
@@ -58,9 +59,34 @@ class ModelRouter:
     ):
         """
         Returns a ChatModel instance based on tier/name and provider.
+        Includes automatic fallback if API keys are missing.
         """
         provider = provider.lower()
         tier_or_name = tier_or_name.lower()
+
+        # Helper to check key availability
+        def has_key(p: str):
+            key_name = f"{p.upper()}_API_KEY"
+            return bool(self.secrets_cache.get(key_name) or os.getenv(key_name))
+
+        # Check if requested provider has a key, if not fallback
+        if not has_key(provider):
+            fallbacks = ["google", "openai", "anthropic", "xai"]
+            found_fallback = False
+            for fb in fallbacks:
+                if fb != provider and has_key(fb):
+                    logger.warning(
+                        "provider_fallback_triggered",
+                        requested=provider,
+                        fallback=fb,
+                        reason="missing_api_key",
+                    )
+                    provider = fb
+                    found_fallback = True
+                    break
+
+            if not found_fallback:
+                logger.error("no_api_keys_available", requested=provider)
 
         # Resolve tier to model name if possible
         model_name = tier_or_name
@@ -76,38 +102,30 @@ class ModelRouter:
         )
 
         if provider == "google":
-            api_key = self.secrets_cache.get("GOOGLE_API_KEY") or os.getenv(
-                "GOOGLE_API_KEY"
+            return ChatGoogleGenerativeAI(
+                model=model_name,
+                temperature=temperature,
+                convert_system_message_to_human=True,
             )
-            if not api_key:
-                logger.warning("missing_google_api_key")
-            return ChatGoogleGenerativeAI(model=model_name, temperature=temperature)
-
         elif provider == "openai":
-            api_key = self.secrets_cache.get("OPENAI_API_KEY") or os.getenv(
-                "OPENAI_API_KEY"
-            )
-            if not api_key:
-                logger.warning("missing_openai_api_key")
             return ChatOpenAI(model=model_name, temperature=temperature)
-
         elif provider == "anthropic":
-            api_key = self.secrets_cache.get("ANTHROPIC_API_KEY") or os.getenv(
-                "ANTHROPIC_API_KEY"
-            )
-            if not api_key:
-                logger.warning("missing_anthropic_api_key")
             return ChatAnthropic(model=model_name, temperature=temperature)
-
         elif provider == "xai":
-            api_key = self.secrets_cache.get("XAI_API_KEY") or os.getenv("XAI_API_KEY")
-            if not api_key:
-                logger.warning("missing_xai_api_key")
             return ChatOpenAI(
                 model=model_name,
-                api_key=api_key,
-                base_url="https://api.x.ai/v1",
+                openai_api_key=self.secrets_cache.get("XAI_API_KEY")
+                or os.getenv("XAI_API_KEY"),
+                openai_api_base="https://api.x.ai/v1",
                 temperature=temperature,
+            )
+        elif provider == "ollama":
+            # Default to localhost:11434 if not specified
+            base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+            return ChatOllama(
+                model=model_name,
+                temperature=temperature,
+                base_url=base_url,
             )
 
         raise ValueError(f"Unsupported provider: {provider}")

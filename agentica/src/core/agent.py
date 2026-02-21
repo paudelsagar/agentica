@@ -55,6 +55,40 @@ class Agentica:
         self.log = logger.bind(agent_name=config.name, agent_id=config.agent_id)
         # Long-term memory
         self.memory = MemoryManager()
+        # Register the universal respond_to_user tool
+        self._register_respond_to_user_tool()
+
+    def _format_error_message(self, error: str) -> str:
+        """Converts technical errors into human-friendly messages."""
+        error_lower = error.lower()
+        if "429" in error or "capacity" in error_lower or "quota" in error_lower:
+            return (
+                "I'm currently experiencing high traffic. Please try again in a minute."
+            )
+        if "500" in error or "internal" in error_lower:
+            return "I encountered a temporary system issue. Please try again shortly."
+        if "context length" in error_lower or "token limit" in error_lower:
+            return "The conversation is getting too long. Please start a new thread."
+        return f"I encountered an issue: {error[:100]}..."
+
+    def _register_respond_to_user_tool(self):
+        """Registers the respond_to_user tool for sending user-facing messages."""
+
+        def respond_to_user(message: str) -> str:
+            """
+            Send a message to the user. Use this tool ONLY for content you want the user to see.
+            All other output (reasoning, planning, internal notes) will be hidden from the user.
+
+            Args:
+                message: The message to display to the user. Should be helpful, clear, and complete.
+
+            Returns:
+                Confirmation that the message was sent.
+            """
+            # Prefix marks this content as user-facing for the streaming handler
+            return f"__USER_RESPONSE__:{message}"
+
+        self.register_tool("respond_to_user", respond_to_user)
 
     async def _recall_context(self, messages: List[BaseMessage]) -> str:
         """
@@ -312,13 +346,31 @@ class Agentica:
             count=len(sanitized_messages),
             last_role=type(sanitized_messages[-1]).__name__,
         )
+
         start_time = time.perf_counter()
-        response = await llm_with_tools.ainvoke(sanitized_messages, config=config)
+        response = None
+        error_msg = None
+
+        try:
+            response = await llm_with_tools.ainvoke(sanitized_messages, config=config)
+            response.name = self.config.name  # Set agent name for history
+        except Exception as e:
+            error_msg = str(e)
+            self.log.error("llm_invocation_failed", error=error_msg)
+
+            # Format error for user-facing response
+            friendly_error = self._format_error_message(error_msg)
+
+            # If using tool-based response, we should wrap it
+            content = f"__USER_RESPONSE__:{friendly_error}"
+            response = AIMessage(content=content, name=self.config.name)
+
         end_time = time.perf_counter()
         execution_time_ms = int((end_time - start_time) * 1000)
 
         # 6. Automated Reflection: Store info in memory
-        await self._reflect_and_store(messages, response.content)
+        if not error_msg:
+            await self._reflect_and_store(messages, response.content)
 
         # 7. Track Usage & Record Trajectory
         thread_id = (
@@ -336,8 +388,8 @@ class Agentica:
             agent_name=self.config.name,
             input_text=last_input,
             output_text=response.content,
-            success=True,  # Default to true, optimizer will filter by feedback
-            feedback="",
+            success=False if error_msg else True,
+            feedback=error_msg or "",
         )
         # Track Usage
         usage = getattr(response, "usage_metadata", {})

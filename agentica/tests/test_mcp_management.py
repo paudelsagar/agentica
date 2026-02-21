@@ -17,7 +17,7 @@ async def test_add_mcp_server():
                 "name": "TestMCP",
                 "type": "sse",
                 "url": "http://localhost:1234",
-                "auth_token_env": "TEST_TOKEN",
+                "auth_token": "TEST_TOKEN",
             },
         )
         assert response.status_code == 200

@@ -12,6 +12,7 @@ langchain-openai
 langchain-anthropic
 langgraph-checkpoint-sqlite
 langchain-chroma
+langchain-ollama
 xai-sdk
 duckduckgo-search<7.0.0
 chromadb

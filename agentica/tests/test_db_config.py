@@ -69,7 +69,7 @@ async def test_mcp_config_in_db():
             "name": "CustomMCP",
             "type": "sse",
             "url": "http://localhost:9999",
-            "auth_token_env": "CUSTOM_TOKEN",
+            "auth_token": "CUSTOM_TOKEN",
         }
         resp = await ac.post("/config/mcp", json=new_mcp)
         assert resp.status_code == 200

@@ -65,6 +65,15 @@ class UsageTracker:
                 )
             """
             )
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS threads (
+                    thread_id TEXT PRIMARY KEY,
+                    custom_name TEXT,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """
+            )
             await db.commit()
         self._initialized = True
 
@@ -133,6 +142,17 @@ class UsageTracker:
                         feedback,
                     ),
                 )
+
+                # Automatically populate thread name if it doesn't exist
+                # We use the first 50 chars of the first input as a default title
+                await db.execute(
+                    """
+                    INSERT OR IGNORE INTO threads (thread_id, custom_name)
+                    VALUES (?, ?)
+                """,
+                    (thread_id, input_text[:100]),
+                )
+
                 await db.commit()
             logger.info(
                 "recorded_trajectory",
@@ -142,6 +162,25 @@ class UsageTracker:
             )
         except Exception as e:
             logger.error("failed_to_record_trajectory", error=str(e))
+
+    async def update_thread_name(self, thread_id: str, custom_name: str):
+        try:
+            await self.initialize()
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute(
+                    """
+                    INSERT INTO threads (thread_id, custom_name)
+                    VALUES (?, ?)
+                    ON CONFLICT(thread_id) DO UPDATE SET 
+                        custom_name=excluded.custom_name,
+                        updated_at=CURRENT_TIMESTAMP
+                """,
+                    (thread_id, custom_name),
+                )
+                await db.commit()
+            logger.info("thread_renamed", thread_id=thread_id, name=custom_name)
+        except Exception as e:
+            logger.error("failed_to_rename_thread", thread_id=thread_id, error=str(e))
 
     async def get_total_usage(self, thread_id: str) -> int:
         """
@@ -333,13 +372,15 @@ class UsageTracker:
                         t1.agent_name,
                         t1.input,
                         t1.success,
-                        t1.timestamp
+                        t1.timestamp,
+                        th.custom_name
                     FROM trajectories t1
                     INNER JOIN (
                         SELECT thread_id, MAX(timestamp) as max_ts
                         FROM trajectories
                         GROUP BY thread_id
                     ) t2 ON t1.thread_id = t2.thread_id AND t1.timestamp = t2.max_ts
+                    LEFT JOIN threads th ON t1.thread_id = th.thread_id
                     ORDER BY t1.timestamp DESC
                     LIMIT ?
                     """,
@@ -350,9 +391,12 @@ class UsageTracker:
                         {
                             "thread_id": r[0],
                             "agent": r[1],
-                            "preview": r[2][:100] + "..." if r[2] else "",
+                            "preview": (
+                                r[5] if r[5] else (r[2][:100] + "..." if r[2] else "")
+                            ),
                             "success": bool(r[3]),
                             "timestamp": r[4],
+                            "custom_name": r[5],
                         }
                         for r in rows
                     ]

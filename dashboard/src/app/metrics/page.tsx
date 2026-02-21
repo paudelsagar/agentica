@@ -13,9 +13,6 @@ import {
   BarChart,
   CartesianGrid,
   Cell,
-  Legend,
-  Pie,
-  PieChart,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -239,16 +236,31 @@ function MetricsDashboard() {
           </div>
           <div className="flex-1 p-6">
             <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={metrics}>
-                <CartesianGrid strokeDasharray="3 3" stroke={chartGridColor} vertical={false} />
-                <XAxis dataKey="name" stroke={chartAxisColor} fontSize={12} tickLine={false} axisLine={false} />
-                <YAxis stroke={chartAxisColor} fontSize={12} tickLine={false} axisLine={false} />
+              <BarChart data={metrics} layout="vertical">
+                <CartesianGrid strokeDasharray="3 3" stroke={chartGridColor} horizontal={false} />
+                <XAxis 
+                  type="number" 
+                  stroke={chartAxisColor} 
+                  fontSize={12} 
+                  tickLine={false} 
+                  axisLine={false} 
+                  tickFormatter={(val) => `${val}ms`}
+                />
+                <YAxis 
+                  dataKey="name" 
+                  type="category" 
+                  stroke={chartAxisColor} 
+                  fontSize={12} 
+                  tickLine={false} 
+                  axisLine={false} 
+                  width={100}
+                />
                 <Tooltip 
                   contentStyle={{ backgroundColor: tooltipBg, border: `1px solid ${tooltipBorder}`, borderRadius: "12px", color: tooltipText }}
                   itemStyle={{ color: tooltipText }}
                   formatter={(value: any) => [`${value}ms`, "Latency"]}
                 />
-                <Bar dataKey="avg_latency_ms" radius={[4, 4, 0, 0]}>
+                <Bar dataKey="avg_latency_ms" radius={[0, 4, 4, 0]}>
                   {metrics.map((entry, index) => (
                     <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
                   ))}
@@ -306,33 +318,36 @@ function MetricsDashboard() {
           </div>
           <div className="flex-1 p-6">
             <ResponsiveContainer width="100%" height="100%">
-              <PieChart>
-                <Pie
-                  data={modelMetrics}
-                  cx="50%"
-                  cy="50%"
-                  innerRadius={60}
-                  outerRadius={80}
-                  paddingAngle={5}
-                  dataKey="tokens"
-                  nameKey="model"
-                >
-                  {modelMetrics.map((entry, index) => (
-                    <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
-                  ))}
-                </Pie>
+              <BarChart data={modelMetrics} layout="vertical">
+                <CartesianGrid strokeDasharray="3 3" stroke={chartGridColor} horizontal={false} />
+                <XAxis 
+                  type="number" 
+                  stroke={chartAxisColor} 
+                  fontSize={12} 
+                  tickLine={false} 
+                  axisLine={false} 
+                  tickFormatter={formatCompactNumber}
+                />
+                <YAxis 
+                  dataKey="model" 
+                  type="category" 
+                  stroke={chartAxisColor} 
+                  fontSize={12} 
+                  tickLine={false} 
+                  axisLine={false} 
+                  width={100}
+                />
                 <Tooltip 
                   contentStyle={{ backgroundColor: tooltipBg, border: `1px solid ${tooltipBorder}`, borderRadius: "12px", color: tooltipText }}
                   itemStyle={{ color: tooltipText }}
                   formatter={(value: any) => [value?.toLocaleString(), "Tokens"]}
                 />
-                <Legend 
-                  layout="horizontal" 
-                  verticalAlign="bottom" 
-                  align="center"
-                  wrapperStyle={{ fontSize: "12px", paddingTop: "20px" }}
-                />
-              </PieChart>
+                <Bar dataKey="tokens" radius={[0, 4, 4, 0]}>
+                  {modelMetrics.map((entry, index) => (
+                    <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                  ))}
+                </Bar>
+              </BarChart>
             </ResponsiveContainer>
           </div>
         </div>

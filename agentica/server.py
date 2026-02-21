@@ -1,8 +1,9 @@
 import os
+import re
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 import aiosqlite
-from datetime import datetime
 from dotenv import load_dotenv
 
 # Load environment variables FIRST
@@ -18,7 +19,13 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, StateGraph
 from pydantic import BaseModel
@@ -38,6 +45,38 @@ from src.core.usage import usage_tracker
 
 # Setup Persistence
 DATABASE_STATE_PATH = os.path.join(os.path.dirname(__file__), "data", "state.db")
+
+
+def filter_supervisor_content(content: str) -> str:
+    """
+    Filter Supervisor content to extract only the human-readable summary.
+    Handles multiple formats:
+    - "SUMMARY: text [END_SUMMARY] PLAN:..." -> extracts "text"
+    - "I'll check... [END_SUMMARY] PLAN:..." -> extracts "I'll check..."
+    - "text PLAN: ..." -> extracts "text"
+    """
+    filtered = content
+
+    # First check if SUMMARY: prefix exists and extract content after it
+    summary_upper = filtered.upper()
+    if "SUMMARY:" in summary_upper:
+        idx = summary_upper.find("SUMMARY:")
+        filtered = filtered[idx + 8 :]  # 8 = len("SUMMARY:")
+
+    # Find the earliest technical marker and cut there
+    # These markers indicate the start of non-user-facing content
+    markers = ["[END_SUMMARY]", "PLAN:", "NEXT AGENT:", "DELEGATION:", "```tool_code"]
+    end_idx = len(filtered)
+    for marker in markers:
+        idx = (
+            filtered.upper().find(marker.upper())
+            if marker != "```tool_code"
+            else filtered.find(marker)
+        )
+        if idx != -1:
+            end_idx = min(end_idx, idx)
+
+    return filtered[:end_idx].strip()
 
 
 @asynccontextmanager
@@ -247,6 +286,10 @@ def gate_router(state):
     if next_agent == "HITL_PAUSE":
         return "HITLPause"
 
+    # Normalize END to FINISH for consistent graph routing
+    if next_agent == "END" or next_agent == ["FINISH"]:
+        return "FINISH"
+
     # For autonomous flow, next_agent is already the specialist (string or list)
     return next_agent
 
@@ -362,6 +405,7 @@ async def build_graph(saver):
             "DataAgent": "DataAgent",
             "DevTeam": "DevTeam",
             "FINISH": END,
+            "END": END,
         },
     )
 
@@ -373,6 +417,7 @@ async def build_graph(saver):
             "DataAgent": "DataAgent",
             "DevTeam": "DevTeam",
             "FINISH": END,
+            "END": END,
         },
     )
 
@@ -423,7 +468,7 @@ class MCPServerConfig(BaseModel):
     name: str
     type: str  # toolbox, sse
     url: str
-    auth_token_env: Optional[str] = None
+    auth_token: Optional[str] = None
 
 
 class AgentCreate(BaseModel):
@@ -448,6 +493,10 @@ class RunRequest(BaseModel):
     message: str
 
 
+class ThreadRenameRequest(BaseModel):
+    name: str
+
+
 @app.post("/run")
 async def run_workflow(request: RunRequest):
     logger.info(
@@ -459,66 +508,130 @@ async def run_workflow(request: RunRequest):
             status_code=503, detail="Server is still initializing the graph..."
         )
 
-    config = {"configurable": {"thread_id": request.thread_id}}
-    input_message = HumanMessage(content=request.message)
+    import json
 
-    final_output = []
+    from fastapi.responses import StreamingResponse
 
-    try:
-        async for event in workflow_app.astream(
-            {
-                "messages": [input_message],
-                "plan": [],
-                "plan_step": 0,
-                "task_context": request.message,
-                "wait_count": 0,
-                "retry_data": {},
-                "intended_agent": "",
-                "require_consensus": False,
-            },
-            config,
-            stream_mode="values",
-        ):
-            if "messages" in event:
-                final_output = event["messages"]
-    except Exception as e:
-        logger.error("workflow_failed", error=str(e))
-        import traceback
+    async def event_generator():
+        config = {"configurable": {"thread_id": request.thread_id}}
+        input_message = HumanMessage(content=request.message)
 
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+        try:
+            current_agent = "SupervisorAgent"
+            # Track content buffers per agent and last yielded content for delta streaming
+            agent_buffers: Dict[str, str] = {}
+            last_yielded_content: Dict[str, str] = {}
 
-    # Determine status based on snapshot
-    status = "success"
-    try:
-        snapshot = await workflow_app.aget_state(config)
-        if snapshot.next:
-            status = "requires_action"
-    except Exception:
-        pass
+            async for event in workflow_app.astream_events(
+                {
+                    "messages": [input_message],
+                    "plan": [],
+                    "plan_step": 0,
+                    "task_context": request.message,
+                    "wait_count": 0,
+                    "retry_data": {},
+                    "intended_agent": "",
+                    "require_consensus": False,
+                },
+                config,
+                version="v2",
+            ):
+                kind = event["event"]
+                # Extract agent name from metadata if available
+                node_agent = event.get("metadata", {}).get("langgraph_node")
 
-    # Extract the last AIMessage content for response
-    last_response = ""
-    if final_output:
-        last_msg = final_output[-1]
-        content = getattr(last_msg, "content", "")
-        if isinstance(content, list):
-            # Extract text from blocks
-            text_parts = []
-            for part in content:
-                if isinstance(part, dict) and "text" in part:
-                    text_parts.append(part["text"])
-                elif isinstance(part, str):
-                    text_parts.append(part)
-            last_response = "\n".join(text_parts)
-        else:
-            last_response = str(content)
+                # Blacklist of internal nodes that should NOT trigger UI updates or bubbles
+                INTERNAL_NODES = [
+                    "HITLGate",
+                    "ErrorAnalyzer",
+                    "JoinParallel",
+                    "ConsensusNode",
+                    "HITLPause",
+                ]
 
-    return {
-        "thread_id": request.thread_id,
-        "status": status,
-        "last_message": last_response,
-    }
+                # Update current_agent ONLY if it's a new node start and NOT internal
+                if kind == "on_chain_start" and node_agent:
+                    current_agent = node_agent
+                    # Don't send empty agent change signals - wait for actual content
+
+                # Capture streaming tokens
+                elif kind == "on_chat_model_stream":
+                    # Use the agent name from the metadata of THIS specific stream event
+                    stream_agent = event.get("metadata", {}).get(
+                        "langgraph_node", current_agent
+                    )
+
+                    # If the stream is coming from an internal node, skip it
+                    if stream_agent in INTERNAL_NODES:
+                        continue
+
+                    content = event["data"]["chunk"].content
+
+                    if content:
+                        # Initialize buffer for this agent if needed
+                        if stream_agent not in agent_buffers:
+                            agent_buffers[stream_agent] = ""
+                            last_yielded_content[stream_agent] = ""
+
+                        agent_buffers[stream_agent] += str(content)
+
+                        # Check for __USER_RESPONSE__ prefix (tool-based user responses)
+                        user_response_marker = "__USER_RESPONSE__:"
+                        buffer = agent_buffers[stream_agent]
+
+                        if user_response_marker in buffer:
+                            # Extract content after the marker
+                            start_idx = buffer.find(user_response_marker) + len(
+                                user_response_marker
+                            )
+                            user_content = buffer[start_idx:]
+
+                            # Only yield new content (delta since last yield)
+                            if len(user_content) > len(
+                                last_yielded_content[stream_agent]
+                            ):
+                                new_content = user_content[
+                                    len(last_yielded_content[stream_agent]) :
+                                ]
+                                if new_content.strip():
+                                    yield f"data: {json.dumps({'agent': stream_agent, 'content': new_content})}\n\n"
+                                    last_yielded_content[stream_agent] = user_content
+                        else:
+                            # Fallback: use marker-based filtering for agents that haven't adopted tool yet
+                            filtered = filter_supervisor_content(buffer)
+                            if filtered and len(filtered) > len(
+                                last_yielded_content[stream_agent]
+                            ):
+                                new_content = filtered[
+                                    len(last_yielded_content[stream_agent]) :
+                                ]
+                                if new_content.strip():
+                                    yield f"data: {json.dumps({'agent': stream_agent, 'content': new_content})}\n\n"
+                                    last_yielded_content[stream_agent] = filtered
+
+                # Also capture tool message responses with __USER_RESPONSE__
+                elif kind == "on_tool_end":
+                    tool_output = event.get("data", {}).get("output", "")
+                    if (
+                        isinstance(tool_output, str)
+                        and "__USER_RESPONSE__:" in tool_output
+                    ):
+                        # Extract agent from metadata
+                        tool_agent = event.get("metadata", {}).get(
+                            "langgraph_node", current_agent
+                        )
+                        # Extract the user-facing content
+                        user_content = tool_output.split("__USER_RESPONSE__:", 1)[1]
+                        if user_content.strip():
+                            yield f"data: {json.dumps({'agent': tool_agent, 'content': user_content})}\n\n"
+
+            yield "data: [DONE]\n\n"
+
+        except Exception as e:
+            logger.error("workflow_failed", error=str(e))
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 @app.post("/approve")
@@ -636,6 +749,115 @@ async def get_state(thread_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/threads/{thread_id}/history")
+async def get_thread_history(
+    thread_id: str,
+    limit: int = Query(
+        default=20, ge=1, le=100, description="Number of messages to return"
+    ),
+    offset: int = Query(
+        default=0, ge=0, description="Number of messages to skip from the end"
+    ),
+):
+    """
+    Retrieves a clean, user-facing conversation history from the LangGraph state.
+    Filters out internal system messages and tool results.
+    Supports pagination with limit and offset parameters.
+    Returns messages in chronological order (oldest first within the returned batch).
+    """
+    if not workflow_app:
+        raise HTTPException(status_code=503, detail="Server initializing...")
+
+    config = {"configurable": {"thread_id": thread_id}}
+    try:
+        snapshot = await workflow_app.aget_state(config)
+        messages = snapshot.values.get("messages", [])
+
+        formatted = []
+        if messages:
+            for msg in messages:
+                # Skip internal system messages or hidden context
+                if isinstance(msg, SystemMessage):
+                    continue
+
+                # Skip ToolMessages (search results, code execution output) as they are for the model
+                if isinstance(msg, ToolMessage):
+                    continue
+
+                # Map roles
+                role = "user" if isinstance(msg, HumanMessage) else "assistant"
+
+                # Extract content (handle complex block formats if any)
+                content = msg.content
+                if isinstance(content, list):
+                    text_parts = []
+                    for part in content:
+                        if isinstance(part, dict) and "text" in part:
+                            text_parts.append(part["text"])
+                        elif isinstance(part, str):
+                            text_parts.append(part)
+                    content = "\n".join(text_parts)
+
+                # Filter Supervisor technical jargon using the same helper as streaming
+                if role == "assistant":
+                    # Use the shared helper function to ensure consistent filtering
+                    content = filter_supervisor_content(str(content))
+
+                # Skip messages with empty content
+                if not str(content).strip():
+                    continue
+
+                # Extract agent name from various possible locations
+                agent_name = None
+                if role == "assistant":
+                    # Try various sources for agent name
+                    agent_name = getattr(msg, "name", None)
+                    if not agent_name:
+                        # Check response_metadata
+                        meta = getattr(msg, "response_metadata", {})
+                        agent_name = meta.get("agent_name") or meta.get(
+                            "langgraph_node"
+                        )
+                    if not agent_name:
+                        # Check additional_kwargs
+                        kwargs = getattr(msg, "additional_kwargs", {})
+                        agent_name = kwargs.get("agent_name") or kwargs.get(
+                            "langgraph_node"
+                        )
+                    if not agent_name:
+                        # Infer from content for Supervisor
+                        if "SUMMARY:" in str(content) or "PLAN:" in str(content):
+                            agent_name = "SupervisorAgent"
+                        else:
+                            agent_name = "Assistant"
+
+                formatted.append(
+                    {
+                        "role": role,
+                        "content": str(content),
+                        "agent": agent_name,
+                    }
+                )
+
+        # Apply pagination: get messages from the end, offset by 'offset', take 'limit' messages
+        total_count = len(formatted)
+        # Calculate start and end indices for pagination (from the end)
+        end_idx = total_count - offset
+        start_idx = max(0, end_idx - limit)
+
+        paginated = formatted[start_idx:end_idx] if end_idx > 0 else []
+        has_more = start_idx > 0  # There are older messages if start_idx > 0
+
+        return {
+            "messages": paginated,
+            "hasMore": has_more,
+            "total": total_count,
+        }
+    except Exception as e:
+        logger.error("get_history_failed", thread_id=thread_id, error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/trajectories/recent")
 async def get_recent_trajectories(limit: int = 10):
     """Returns the most recent trajectories (unique threads)."""
@@ -662,6 +884,17 @@ async def get_trajectories(thread_id: str):
                 }
                 for r in rows
             ]
+
+
+@app.patch("/trajectories/{thread_id}/name")
+async def rename_thread(thread_id: str, request: ThreadRenameRequest):
+    """Updates the custom name for a thread."""
+    try:
+        await usage_tracker.update_thread_name(thread_id, request.name)
+        return {"status": "renamed", "thread_id": thread_id, "name": request.name}
+    except Exception as e:
+        logger.error("rename_failed", thread_id=thread_id, error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/agents")
