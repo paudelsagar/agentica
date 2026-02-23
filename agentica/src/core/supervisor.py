@@ -1,12 +1,11 @@
-import re
+import asyncio
 from typing import Any, Dict, List, Literal, Optional
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from src.core.agent import Agentica, AgenticaConfig
 from src.core.config import load_agent_config
-from src.core.consensus import Vote
 from src.core.logger import get_logger
 from src.core.model_router import model_router
 from src.core.registry import tool_registry
@@ -14,321 +13,331 @@ from src.core.usage import usage_tracker
 
 logger = get_logger(__name__)
 
+# --------------------------------------------------------------------------- #
+#  Structured Output Models — replaces fragile regex parsing                   #
+# --------------------------------------------------------------------------- #
 
-class NextStep(BaseModel):
-    next: List[
-        Literal["ResearchAgent", "CoderAgent", "ReviewerAgent", "DataAgent", "FINISH"]
-    ]
+VALID_AGENTS = Literal[
+    "ResearchAgent", "CoderAgent", "ReviewerAgent", "DataAgent", "DevTeam", "FINISH"
+]
+
+
+class RouterDecision(BaseModel):
+    """Structured routing decision from the Supervisor LLM."""
+
+    summary: str = Field(
+        description="A concise, user-facing explanation of what is happening and why. "
+        "This is shown directly to the user."
+    )
+    next_agents: List[VALID_AGENTS] = Field(
+        default=["FINISH"],
+        description="List of agents to delegate to next, or ['FINISH'] if the task is complete.",
+    )
+    plan: List[str] = Field(
+        default_factory=list,
+        description="Optional multi-step plan. Each item is one step.",
+    )
 
 
 class SupervisorAgent(Agentica):
     """
     Orchestrates the workflow by deciding the next agent or step.
+    Uses structured output for deterministic routing decisions.
     """
 
+    AGENT_TIMEOUT = 30  # seconds
+
     def __init__(self, config: Optional[AgenticaConfig] = None):
-        """
-        Supervisor Agent that orchestrates the workflow by deciding the next worker.
-        """
         if config is None:
             config = load_agent_config("SupervisorAgent")
         super().__init__(config)
 
+    # ------------------------------------------------------------------ #
+    #  Prompt Construction — extracted for clarity                        #
+    # ------------------------------------------------------------------ #
+
+    def _build_system_prompt(
+        self,
+        state: Dict[str, Any],
+        plan: List[str],
+        plan_step: int,
+        recalled_context: str,
+        has_research_results: bool,
+    ) -> str:
+        """Builds a lean system prompt with only relevant context."""
+        use_web = state.get("use_web", True)
+
+        # Tool discovery (top 10, compact)
+        all_tools = tool_registry.list_tools()
+        if not use_web:
+            all_tools = [t for t in all_tools if t.owner_agent != "ResearchAgent"]
+        display_tools = all_tools[:10]
+        tools_section = ""
+        if display_tools:
+            tools_str = "\n".join(
+                f"- {t.name} ({t.owner_agent})" for t in display_tools
+            )
+            tools_section = f"\n\nAVAILABLE TOOLS:\n{tools_str}"
+
+        # Plan context
+        plan_section = ""
+        if plan:
+            plan_str = "\n".join(f"{i + 1}. {p}" for i, p in enumerate(plan))
+            plan_section = (
+                f"\n\nCURRENT PLAN:\n{plan_str}\nCURRENT STEP: {plan_step + 1}"
+            )
+
+        # Delegation guard
+        delegation_guard = ""
+        if has_research_results:
+            delegation_guard = (
+                "\n\nCRITICAL: ResearchAgent has already provided information. "
+                "Do NOT delegate back to ResearchAgent unless you need totally different facts. "
+                "Instead, your SUMMARY should now provide the final answer to the user based on the tool results."
+            )
+        elif use_web:
+            delegation_guard = (
+                "\n\nCRITICAL: If the user needs real-time information, current facts, "
+                "or web searches, delegate to ResearchAgent. Do NOT answer from memory."
+            )
+        elif not use_web:
+            delegation_guard = "\n\nCRITICAL: Web search is DISABLED. Do NOT delegate to ResearchAgent."
+
+        base_prompt = self.config.system_prompt or ""
+        return (
+            f"{base_prompt}{tools_section}{plan_section}"
+            f"{recalled_context}{delegation_guard}"
+        )
+
+    def _check_research_results(self, messages: List) -> bool:
+        """
+        Check if ResearchAgent has already contributed results FOR THE CURRENT QUERY.
+        We only look at messages since the last HumanMessage.
+        """
+        # Find index of last human message
+        last_human_idx = -1
+        for i in range(len(messages) - 1, -1, -1):
+            if isinstance(messages[i], HumanMessage):
+                last_human_idx = i
+                break
+
+        if last_human_idx == -1:
+            return False
+
+        # Check if ResearchAgent spoke AFTER that human message
+        for m in messages[last_human_idx + 1 :]:
+            name = getattr(m, "name", "") or m.additional_kwargs.get("name", "")
+            if name == "ResearchAgent":
+                return True
+        return False
+
+    # ------------------------------------------------------------------ #
+    #  Decision Parsing — structured output with fallback                #
+    # ------------------------------------------------------------------ #
+
+    async def _get_structured_decision(
+        self, llm, messages: List, config: Optional[RunnableConfig]
+    ) -> RouterDecision:
+        """
+        Attempts structured output first. If it fails (e.g., Ollama returns free text),
+        parses the error's embedded free-text response directly — no second LLM call needed.
+        """
+        try:
+            structured_llm = llm.with_structured_output(RouterDecision)
+            decision = await asyncio.wait_for(
+                structured_llm.ainvoke(messages, config=config),
+                timeout=self.AGENT_TIMEOUT,
+            )
+            self.log.info("structured_routing_success", decision=decision.model_dump())
+            return decision
+        except asyncio.TimeoutError:
+            self.log.error("supervisor_timeout")
+            return RouterDecision(
+                summary="I'm taking longer than expected. Please try again.",
+                next_agents=["FINISH"],
+            )
+        except Exception as e:
+            error_text = str(e)
+            self.log.warning(
+                "structured_output_failed_parsing_error_text", error=error_text[:200]
+            )
+            # The error message from langchain contains the raw LLM output — parse it directly
+            return self._parse_free_text(error_text)
+
+    def _parse_free_text(self, content: str) -> RouterDecision:
+        """Parse routing decision from free-text LLM output (no LLM call needed)."""
+        import re
+
+        content_upper = content.upper()
+
+        # Parse agents
+        next_agents: List[str] = []
+        agent_map = {
+            "RESEARCHAGENT": "ResearchAgent",
+            "CODERAGENT": "CoderAgent",
+            "REVIEWERAGENT": "ReviewerAgent",
+            "DATAAGENT": "DataAgent",
+            "DEVTEAM": "DevTeam",
+        }
+        for keyword, agent_name in agent_map.items():
+            if keyword in content_upper:
+                next_agents.append(agent_name)
+
+        # Also check "NEXT AGENT:" pattern
+        agent_matches = re.findall(r"NEXT AGENT:\s*(.*)", content, re.IGNORECASE)
+        if agent_matches:
+            for match in agent_matches:
+                target = match.split("\n")[0].upper().strip()
+                if "RESEARCH" in target:
+                    next_agents.append("ResearchAgent")
+                elif "CODER" in target:
+                    next_agents.append("CoderAgent")
+                elif "DATA" in target:
+                    next_agents.append("DataAgent")
+                elif "FINISH" in target:
+                    next_agents.append("FINISH")
+
+        # Deduplicate
+        next_agents = list(dict.fromkeys(next_agents)) if next_agents else ["FINISH"]
+
+        # Parse summary
+        summary = ""
+        summary_match = re.search(
+            r"SUMMARY:\s*(.*?)(?=\n\s*NEXT AGENT:|PLAN:|$)",
+            content,
+            re.DOTALL | re.IGNORECASE,
+        )
+        if summary_match:
+            summary = summary_match.group(1).strip()
+
+        if not summary and next_agents != ["FINISH"]:
+            summary = f"Delegating to {', '.join(next_agents)} to handle your request."
+
+        if not summary:
+            summary = "Processing your request."
+
+        # Parse plan
+        plan = []
+        if "PLAN:" in content_upper:
+            plan_match = re.search(
+                r"PLAN:(.*?)(?=NEXT AGENT:|$)",
+                content,
+                re.DOTALL | re.IGNORECASE,
+            )
+            if plan_match:
+                steps = plan_match.group(1).strip().split("\n")
+                plan = [re.sub(r"^\d+\.\s*", "", s).strip() for s in steps if s.strip()]
+
+        return RouterDecision(
+            summary=summary,
+            next_agents=next_agents,
+            plan=plan,
+        )
+
+    # ------------------------------------------------------------------ #
+    #  Main Entry Point                                                   #
+    # ------------------------------------------------------------------ #
+
     async def __call__(
         self, state: Dict[str, Any], config: Optional[RunnableConfig] = None
     ) -> Dict[str, Any]:
-        """
-        Invokes the LLM to decide the next step, managing the multi-step plan.
-        """
+        """Invokes the LLM to decide the next step."""
         messages = state.get("messages", [])
         plan = state.get("plan", [])
         plan_step = state.get("plan_step", 0)
 
-        # 0. Prune history to avoid bias from previous failures (8B models are sensitive)
+        # 0. Prune history (keep first + last 5)
         if len(messages) > 6:
-            # Keep the first (often the first human message) and the last 5
             messages = [messages[0]] + messages[-5:]
             self.log.info("pruned_supervisor_history", kept=len(messages))
 
-        # 1. Proactive RAG: Recall context
-        recalled_context = await self._recall_context(messages)
-
-        # 2. Logic Guard: Force delegation for known real-time patterns
-        # BREAK LOOP: Check for research results robustly
-        has_research_results = False
-        for m in messages:
-            name = getattr(m, "name", "") or m.additional_kwargs.get("name", "")
-            if name == "ResearchAgent":
-                has_research_results = True
-                break
-            # Fallback check for content indicators if name is wiped
-            content = str(m.content).upper()
-            if "RESEARCHAGENT" in content and (
-                "BASED ON MY SEARCH" in content or "FOUND THE FOLLOWING" in content
-            ):
-                has_research_results = True
-                break
-
-        # Check for dynamic needs (e.g., current events) using a simplified, generic guard
-        # or completely omit static lists in favor of system prompt instructions.
-        delegation_guard = ""
-        use_web = state.get("use_web", True)
-        if not has_research_results and use_web:
-            # We add a subtle reminder, but leave the actual routing decision to the LLM
-            delegation_guard = "\n\nCRITICAL THINKING: If the user requires real-time information, current facts, or external searches, you MUST delegate to ResearchAgent for the initial step. DO NOT attempt to answer questions about the world without searching first."
-        elif not use_web:
-            delegation_guard = "\n\nCRITICAL: Web search is currently DISABLED. DO NOT delegate to ResearchAgent. Use your internal knowledge only."
-
-        # 3. Update System Prompt with plan, tools, and context
-        all_tools = tool_registry.list_tools()
-        if not use_web:
-            all_tools = [t for t in all_tools if t.owner_agent != "ResearchAgent"]
-
-        tools_str = "\n".join(
-            [f"- {t.name} (Owner: {t.owner_agent}): {t.description}" for t in all_tools]
+        # 1. Context recall (skip on initial delegation)
+        has_prior_agent_work = any(
+            getattr(m, "name", "") and getattr(m, "name", "") != self.config.name
+            for m in messages
+            if not isinstance(m, (SystemMessage, HumanMessage))
         )
-        tool_discovery_prompt = (
-            f"\n\nAVAILABLE TOOLS IN SYSTEM:\n{tools_str}" if all_tools else ""
-        )
-        self.log.info("discovered_tools", count=len(all_tools), tools=tools_str)
+        recalled_context = ""
+        if has_prior_agent_work:
+            recalled_context = await self._recall_context(messages)
 
-        consensus_instr = (
-            "\n\nCRITICAL DECISIONS: If a step is high-risk (e.g., destructive actions), "
-            "include 'CRITICAL' in your response to trigger a multi-agent consensus panel. "
-            "You must then list multiple agents (e.g., 'NEXT AGENT: CoderAgent, ReviewerAgent'). "
-            "Each agent in the panel MUST respond with 'DECISION: APPROVE' or 'DECISION: REJECT' "
-            "and a 'REASON: <explanation>'."
+        # 2. Check for existing research results
+        has_research_results = self._check_research_results(messages)
+
+        # 3. Build system prompt
+        system_content = self._build_system_prompt(
+            state, plan, plan_step, recalled_context, has_research_results
         )
 
-        plan_str = (
-            "\n".join([f"{i+1}. {p}" for i, p in enumerate(plan)])
-            if plan
-            else "No plan yet."
-        )
-        context_prompt = f"\n\nCURRENT PLAN:\n{plan_str}\nCURRENT STEP: {plan_step + 1}"
-
-        self.system_content = (
-            (self.config.system_prompt or "")
-            + tool_discovery_prompt
-            + consensus_instr
-            + context_prompt
-            + recalled_context
-            + delegation_guard
-            + "\n\nCRITICAL: Your response MUST begin with a 'SUMMARY:' section "
-            "intended for the user. Even if you are delegating, explain to the human "
-            "what you are doing and why. NEVER leave the summary empty."
-        )
-        self.log.info(
-            "consolidated_system_prompt", content_preview=self.system_content[:200]
-        )
-        # Filter out any existing SystemMessages to avoid redundant/conflicting instructions
+        # 4. Prepare messages
         messages = [m for m in messages if not isinstance(m, SystemMessage)]
-
-        system_msg = SystemMessage(content=self.system_content)
-        messages = [system_msg] + messages
+        messages = [SystemMessage(content=system_content)] + messages
+        messages = await self._sanitize_history(messages)
 
         self.log.info("supervisor_deciding_next_step", step=plan_step)
 
-        # 3. Sanitize history for strict role alternation/trailing messages
-        messages = await self._sanitize_history(messages)
-
-        next_agent = ["FINISH"]
-        wait_count = 0
-        require_consensus = False
-
-        # 3.1 Determine which LLM to use (check thinking mode)
+        # 5. Select LLM
         current_llm = self.llm
         if state.get("thinking_mode"):
-            self.log.info("thinking_mode_enabled_switching_to_thinking_tier")
+            self.log.info("thinking_mode_enabled")
             current_llm = model_router.get_model(
                 tier_or_name="thinking",
                 provider=self.config.model_provider,
                 temperature=0,
             )
 
-        try:
-            response = await current_llm.ainvoke(messages, config=config)
-            response.name = self.config.name  # Set agent name for history
-            content = response.content
-            self.log.info("supervisor_raw_response", content=content)
+        # 6. Get structured decision
+        decision = await self._get_structured_decision(current_llm, messages, config)
 
-            # 4. Multi-agent parsing (Moved UP)
-            content_upper = content.upper()
-            temp_next_agent = ["FINISH"]
-            agent_matches = re.findall(r"NEXT AGENT:\s*(.*)", content, re.IGNORECASE)
-
-            if agent_matches:
-                parsed_agents = []
-                for match in agent_matches:
-                    targets_str = match.split("\n")[0].upper()
-                    targets = [t.strip() for t in targets_str.split(",") if t.strip()]
-
-                    for target in targets:
-                        if "RESEARCH" in target:
-                            parsed_agents.append("ResearchAgent")
-                        elif "CODER" in target:
-                            parsed_agents.append("CoderAgent")
-                        elif "REVIEW" in target:
-                            parsed_agents.append("ReviewerAgent")
-                        elif "DATA" in target or "DATABASE" in target:
-                            parsed_agents.append("DataAgent")
-                        elif "DEVTEAM" in target or "DEVELOPMENT" in target:
-                            parsed_agents.append("DevTeam")
-                        elif "FINISH" in target:
-                            parsed_agents.append("FINISH")
-
-                if parsed_agents:
-                    temp_next_agent = list(dict.fromkeys(parsed_agents))
-
-            # If no match, fallback to simple lookup ONLY if we don't have results already
-            has_research_results = any(
-                getattr(m, "name", "") == "ResearchAgent" for m in messages
+        # 7. Apply loop prevention
+        next_agent = list(decision.next_agents)
+        if has_research_results and "ResearchAgent" in next_agent:
+            # Only allow a second research if the first one was absolutely empty
+            # For now, let's be strict and force a finish.
+            self.log.info(
+                "forcing_finish_to_prevent_research_loop", original=next_agent
             )
-
-            if temp_next_agent == ["FINISH"] and "FINISH" not in content_upper:
-                if (
-                    not has_research_results
-                ):  # Prevent falling back into a loop if we already have the answer
-                    if "RESEARCHAGENT" in content_upper:
-                        temp_next_agent = ["ResearchAgent"]
-                    elif "DATAAGENT" in content_upper:
-                        temp_next_agent = ["DataAgent"]
-                    elif "CODERAGENT" in content_upper:
-                        temp_next_agent = ["CoderAgent"]
-                    elif "REVIEWERAGENT" in content_upper:
-                        temp_next_agent = ["ReviewerAgent"]
-
-            # HARD LOOP PREVENTION: Force FINISH if we just got back from a worker
-            # and the model is trying to re-delegate helplessly.
-            if has_research_results:
-                self.log.info(
-                    "forcing_finish_to_prevent_loop", original=temp_next_agent
-                )
-                temp_next_agent = ["FINISH"]
-
-            next_agent = temp_next_agent
-
-            # 5. Extract parts: SUMMARY and Override
-            summary_match = re.search(
-                r"SUMMARY:(.*?)(?=\[END_SUMMARY\]|PLAN:|NEXT AGENT:|$)",
-                content,
-                re.DOTALL | re.IGNORECASE,
-            )
-            summary = summary_match.group(1).strip() if summary_match else ""
-
-            # If NEXT AGENT is present but no SUMMARY, use everything before NEXT AGENT
-            if not summary and next_agent != ["FINISH"]:
-                parts = re.split(r"NEXT AGENT:", content, flags=re.IGNORECASE)
-                if len(parts) > 1 and len(parts[0].strip()) > 10:
-                    summary = parts[0].strip()
-                    # If the accidental summary contains refusal phrases, override it
-                    if any(
-                        kw in summary.lower()
-                        for kw in ["unable", "cannot", "sorry", "nmda.gov.np"]
-                    ):
-                        summary = f"I am delegating to {', '.join(next_agent)} to fetch the information you requested."
-                else:
-                    summary = f"I am coordinating with {', '.join(next_agent)} to handle your request."
-
-            # Final fallback for any refusal in ANY summary
-            if any(
-                kw in summary.lower()
-                for kw in ["unable", "cannot", "sorry", "nmda.gov.np"]
-            ) and next_agent != ["FINISH"]:
-                summary = f"I've delegated the search to {', '.join(next_agent)} to get you the latest information."
-
-            # 3. Automated Reflection: Store info in memory
-            await self._reflect_and_store(messages, content)
-
-            # Record Usage
-            usage = getattr(response, "usage_metadata", {})
-            thread_id = (
-                config.get("configurable", {}).get("thread_id", "unknown")
-                if config
-                else "unknown"
-            )
-            if usage:
-                resolved_model = response.response_metadata.get(
-                    "model_name"
-                ) or getattr(
-                    self.llm,
-                    "model",
-                    getattr(self.llm, "model_name", self.config.model_tier),
-                )
-                await usage_tracker.record_usage(
-                    agent_name=self.config.name,
-                    thread_id=thread_id,
-                    model_name=resolved_model,
-                    prompt_tokens=usage.get("input_tokens", 0),
-                    completion_tokens=usage.get("output_tokens", 0),
-                    total_tokens=usage.get("total_tokens", 0),
-                )
-
-            # Extract Plan
-            new_plan = []
-            if "PLAN:" in content.upper():
-                plan_match = re.search(
-                    r"PLAN:(.*?)(?=NEXT AGENT:|$)", content, re.DOTALL | re.IGNORECASE
-                )
-
-                if plan_match:
-                    steps = plan_match.group(1).strip().split("\n")
-                    new_plan = [
-                        re.sub(r"^\d+\.\s*", "", s).strip() for s in steps if s.strip()
-                    ]
-                    plan = new_plan
-                    plan_step = 0  # reset if plan changed
-
-                # Replaced by moved block
-                elif "CODERAGENT" in content_upper:
-                    next_agent = ["CoderAgent"]
-                elif "REVIEWERAGENT" in content_upper:
-                    next_agent = ["ReviewerAgent"]
-                elif "DEVTEAM" in content_upper or "DEVELOPMENTTEAM" in content_upper:
-                    next_agent = ["DevTeam"]
-                elif "DATAAGENT" in content_upper:
-                    next_agent = ["DataAgent"]
-
-            # Use summary if available for the final message to user
-            if summary:
-                response.content = summary
-
-            # 4. Critical Decision Check (Phase 17)
-            require_consensus = "CRITICAL" in content_upper and len(next_agent) > 1
-
-            # Increment plan step
-            if next_agent != ["FINISH"]:
-                plan_step += 1
-
-            wait_count = len(next_agent) if next_agent != ["FINISH"] else 0
-
-        except Exception as e:
-            error_msg = str(e)
-            self.log.error("supervisor_decision_failed", error=error_msg)
-            response = AIMessage(content=f"Error: {error_msg}", name=self.config.name)
             next_agent = ["FINISH"]
-            wait_count = 0
+        elif has_research_results and "FINISH" not in next_agent:
+            # If we had results and the LLM is wandering to other specialists, maybe restrict?
+            # For now, allow other specialists but keep an eye.
+            pass
 
-        # Record Trajectory
+        # 8. Update plan
+        if decision.plan:
+            plan = decision.plan
+            plan_step = 0
+
+        # 9. Build response
+        summary = decision.summary
+        if not summary and next_agent != ["FINISH"]:
+            summary = (
+                f"Coordinating with {', '.join(next_agent)} to handle your request."
+            )
+
+        response = AIMessage(content=summary, name=self.config.name)
+
+        # 10. Increment plan step
+        if next_agent != ["FINISH"]:
+            plan_step += 1
+
+        wait_count = len(next_agent) if next_agent != ["FINISH"] else 0
+        require_consensus = len(next_agent) > 1 and next_agent != ["FINISH"]
+
+        # 11. Record usage & trajectory
         thread_id = (
             config.get("configurable", {}).get("thread_id", "unknown")
             if config
             else "unknown"
         )
-        last_input = ""
-        if messages and len(messages) > 1:
-            # message[0] is often system prompt we added above
-            # the original messages were at the end of the list after our system prompt insertion
-            # wait, messages = [system_msg] + messages (line 84)
-            # so original last message is messages[-1]
-            last_input = str(messages[-1].content)
 
+        last_input = str(messages[-1].content) if messages else ""
         await usage_tracker.record_trajectory(
             thread_id=thread_id,
             agent_name=self.config.name,
             input_text=last_input,
             output_text=response.content,
-            success=True if "Error:" not in response.content else False,
+            success="Error:" not in response.content,
             feedback=response.content if "Error:" in response.content else "",
         )
 

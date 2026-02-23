@@ -1,4 +1,5 @@
 import os
+import re
 from typing import Any, Dict, List, Optional
 
 from langchain_anthropic import ChatAnthropic
@@ -8,6 +9,23 @@ from langchain_openai import ChatOpenAI
 from src.core.logger import get_logger
 
 logger = get_logger(__name__)
+
+# Patterns that indicate simple queries (greetings, factual lookups)
+SIMPLE_QUERY_PATTERNS = [
+    r"^(hi|hello|hey|good morning|good evening|thanks|thank you)",
+    r"^what (is|are|was|were)\b",
+    r"^(who|when|where) (is|are|was|were)\b",
+    r"^how (is|are|was|were)\b",
+    r"\b(weather|temperature|time|date|price)\b",
+]
+
+# Patterns that indicate complex queries (multi-step, coding)
+COMPLEX_QUERY_PATTERNS = [
+    r"\b(implement|refactor|debug|fix|write code|build|create|design)\b",
+    r"\b(analyze|compare|evaluate|explain in detail|step by step)\b",
+    r"\b(python|javascript|typescript|sql|api|database)\b",
+    r"\b(plan|strategy|architecture|workflow)\b",
+]
 
 
 class ModelRouter:
@@ -195,6 +213,47 @@ class ModelRouter:
             logger.error("failed_to_calculate_optimal_tier", error=str(e))
 
         return "fast"
+
+    def classify_query_complexity(self, query: str) -> str:
+        """
+        Classifies a query as 'simple' or 'complex' based on pattern matching.
+        Returns 'simple' or 'complex'.
+        """
+        q = query.strip().lower()
+
+        # Short queries are typically simple
+        if len(q.split()) <= 5:
+            return "simple"
+
+        # Check for complex patterns first (higher priority)
+        for pattern in COMPLEX_QUERY_PATTERNS:
+            if re.search(pattern, q, re.IGNORECASE):
+                return "complex"
+
+        # Check for simple patterns
+        for pattern in SIMPLE_QUERY_PATTERNS:
+            if re.search(pattern, q, re.IGNORECASE):
+                return "simple"
+
+        # Default to fast for ambiguous queries
+        return "simple"
+
+    def get_cost_aware_tier(self, query: str, agent_name: str) -> str:
+        """
+        Returns the optimal model tier based on query complexity.
+        Simple queries -> fast tier (cheaper, faster)
+        Complex queries -> heavy tier (more capable)
+        """
+        complexity = self.classify_query_complexity(query)
+        tier = "fast" if complexity == "simple" else "heavy"
+        logger.info(
+            "cost_aware_tier_selection",
+            query_preview=query[:50],
+            complexity=complexity,
+            tier=tier,
+            agent=agent_name,
+        )
+        return tier
 
 
 model_router = ModelRouter()

@@ -1,3 +1,4 @@
+import asyncio
 import os
 import time
 import uuid
@@ -22,7 +23,14 @@ from src.core.mcp import mcp_router
 from src.core.memory import MemoryManager
 from src.core.model_router import model_router
 from src.core.registry import ToolEntry, tool_registry
+from src.core.tool_executor import ToolExecutor
 from src.core.usage import load_monitor, usage_tracker
+
+# Agent-level LLM timeout
+AGENT_LLM_TIMEOUT = 45
+
+# Maximum tool call rounds before forcing a final answer
+MAX_TOOL_ITERATIONS = 3
 
 logger = get_logger(__name__)
 
@@ -319,8 +327,12 @@ class Agentica:
             self.log.info("trimming_history", original_count=len(messages), keeping=15)
             messages = messages[-15:]
 
-        # 1. Proactive RAG: Recall context
-        recalled_context = await self._recall_context(messages)
+        # 1. Proactive RAG: Recall context (skip for tool-equipped agents — tools provide context)
+        recalled_context = ""
+        if (
+            not self.tool_functions or len(self.tool_functions) <= 1
+        ):  # only respond_to_user
+            recalled_context = await self._recall_context(messages)
 
         # 2. Bind tools
         tools = self._get_langchain_tools()
@@ -334,7 +346,22 @@ class Agentica:
         # Filter out any existing SystemMessages to avoid conflicting instructions in hierachical flows
         messages = [m for m in messages if not isinstance(m, SystemMessage)]
 
-        system_content = (self.config.system_prompt or "") + recalled_context
+        # --- Tool Iteration Logic (Prevent Infinite Loops) ---
+        current_iterations = state.get("tool_iterations", 0)
+        iter_logic_prompt = ""
+        if current_iterations >= MAX_TOOL_ITERATIONS:
+            self.log.warning(
+                "max_tool_iterations_reached_forcing_answer", agent=self.config.name
+            )
+            iter_logic_prompt = (
+                "\n\n[SYSTEM: CRITICAL] You have performed multiple search/tool rounds. "
+                "Do NOT call any more tools. Use the information you have already gathered "
+                "to provide a final comprehensive answer to the user now using the 'respond_to_user' tool."
+            )
+
+        system_content = (
+            (self.config.system_prompt or "") + recalled_context + iter_logic_prompt
+        )
         if system_content:
             messages = [SystemMessage(content=system_content)] + messages
 
@@ -359,12 +386,18 @@ class Agentica:
         error_msg = None
 
         try:
-            response = await llm_with_tools.ainvoke(sanitized_messages, config=config)
-            # Ensure name is set in both the attribute and additional_kwargs for persistence
+            response = await asyncio.wait_for(
+                llm_with_tools.ainvoke(sanitized_messages, config=config),
+                timeout=AGENT_LLM_TIMEOUT,
+            )
+            # Ensure name is set for persistence
             response.name = self.config.name
             if not response.additional_kwargs:
                 response.additional_kwargs = {}
             response.additional_kwargs["name"] = self.config.name
+        except asyncio.TimeoutError:
+            error_msg = f"LLM timed out after {AGENT_LLM_TIMEOUT}s"
+            self.log.error("llm_timeout", timeout=AGENT_LLM_TIMEOUT)
         except Exception as e:
             error_msg = str(e)
             self.log.error("llm_invocation_failed", error=error_msg)
@@ -380,7 +413,8 @@ class Agentica:
         execution_time_ms = int((end_time - start_time) * 1000)
 
         # 6. Automated Reflection: Store info in memory
-        if not error_msg:
+        # Skip for tool-call responses (raw search results are noise, not facts)
+        if not error_msg and not response.tool_calls:
             await self._reflect_and_store(messages, response.content)
 
         # 7. Track Usage & Record Trajectory
@@ -431,92 +465,35 @@ class Agentica:
             usage=usage,
         )
 
-        # 4. Handle Tool Calls
+        # 4. Handle Tool Calls via ToolExecutor
         if response.tool_calls:
+            # Hard limit Check
+            if current_iterations >= MAX_TOOL_ITERATIONS:
+                self.log.error(
+                    "max_iterations_reached_refusing_tools", agent=self.config.name
+                )
+                # Force a response if none exists
+                if not response.content.strip():
+                    response.content = "Reached maximum tool iterations. Synthesizing answer from gathered data."
+
+                return {
+                    "messages": [response],
+                    "next_agent": "END",
+                    "tool_iterations": 0,
+                }
+
             self.log.info("llm_requested_tools", count=len(response.tool_calls))
-            # In a pure LangGraph React pattern, we might return the AIMessage and let a separate ToolNode handle it.
-            # However, to keep our 'Agent Node' self-contained as per previous design, we will execute here.
-            # OR we can just return the AIMessage and have the graph loop back?
-            # For simplicity in this refactor, let's execute and return the result + AIMessage.
-
-            # Actually, standard ReAct style in LangGraph usually splits Reason -> Act.
-            # But let's support "Agent executes its own tools" for now to match interface.
-
-            tool_messages = []
-            for tool_call in response.tool_calls:
-                tool_name = tool_call["name"]
-                tool_args = tool_call["args"]
-                tool_call_id = tool_call["id"]
-
-                if tool_name in self.tool_functions:
-                    self.log.info("executing_tool", tool_name=tool_name, args=tool_args)
-                    # Execute tool function
-                    try:
-                        import inspect
-
-                        func = self.tool_functions[tool_name]
-
-                        if inspect.iscoroutinefunction(func) or inspect.isawaitable(
-                            func
-                        ):
-                            result = await func(**tool_args)
-                        elif hasattr(func, "__call__") and (
-                            inspect.iscoroutinefunction(func.__call__)
-                            or inspect.isawaitable(func.__call__)
-                        ):
-                            # This covers objects like ToolboxTool that have async __call__
-                            # But wait, calling func() itself might return a coroutine
-                            res = func(**tool_args)
-                            if inspect.isawaitable(res):
-                                result = await res
-                            else:
-                                result = res
-                        else:
-                            result = func(**tool_args)
-
-                        tool_messages.append(
-                            ToolMessage(
-                                content=str(result),
-                                tool_call_id=tool_call_id,
-                                name=tool_name,
-                            )
-                        )
-
-                    except Exception as e:
-                        self.log.error(
-                            "tool_execution_failed_exception",
-                            tool_name=tool_name,
-                            error=str(e),
-                        )
-                        import traceback
-
-                        traceback.print_exc()
-                        tool_messages.append(
-                            ToolMessage(
-                                content=f"Error: {str(e)}",
-                                tool_call_id=tool_call_id,
-                                name=tool_name,
-                            )
-                        )
-
-                else:
-                    self.log.warning("tool_not_found", tool_name=tool_name)
-                    tool_messages.append(
-                        ToolMessage(
-                            content=f"Tool '{tool_name}' not found.",
-                            tool_call_id=tool_call_id,
-                            name=tool_name,
-                        )
-                    )
-
-            # Append tool outputs to valid state
-            # If we want to continue conversation, we might return these.
-            # For this simple delegation flow, we might just recognize we are done or pass to next agent.
-
-            # Recurse to self to process tool outputs
+            executor = ToolExecutor(self.tool_functions, self.config.name)
+            tool_messages = await executor.execute_tool_calls(response.tool_calls)
             return {
                 "messages": [response] + tool_messages,
                 "next_agent": self.config.name,
+                "tool_iterations": current_iterations + 1,
             }
 
-        return {"messages": [response], "next_agent": "END", "wait_count": -1}
+        return {
+            "messages": [response],
+            "next_agent": "END",
+            "wait_count": -1,
+            "tool_iterations": 0,
+        }

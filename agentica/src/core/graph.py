@@ -25,6 +25,7 @@ class AgentState(TypedDict):
     require_consensus: bool
     thinking_mode: bool
     use_web: bool
+    tool_iterations: Annotated[int, lambda a, b: b]  # Tracks tool rounds per agent
 
 
 # We will define the graph builder here, but nodes will be added dynamically

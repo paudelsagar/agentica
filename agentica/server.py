@@ -286,11 +286,26 @@ def gate_router(state):
     if next_agent == "HITL_PAUSE":
         return "HITLPause"
 
-    # Normalize END to FINISH for consistent graph routing
-    if next_agent == "END" or next_agent == ["FINISH"]:
-        return "FINISH"
+    # Specialist completion logic (formerly worker_router)
+    if next_agent == "END" or next_agent == "FINISH" or next_agent == ["FINISH"]:
+        # Check if the agent already produced a user-facing response
+        messages = state.get("messages", [])
+        has_user_response = any(
+            "__USER_RESPONSE__" in str(getattr(m, "content", ""))
+            for m in messages[-3:]  # Check last few messages
+        )
+        if has_user_response:
+            logger.info("gate_router_finishing_directly")
+            return "FINISH"
+        else:
+            logger.info("gate_router_no_response_returning_to_supervisor")
+            return "SupervisorAgent"
 
-    # For autonomous flow, next_agent is already the specialist (string or list)
+    # Coerce list to string (supervisor sometimes returns lists)
+    if isinstance(next_agent, list) and len(next_agent) == 1:
+        next_agent = next_agent[0]
+
+    # For autonomous flow, next_agent is the specialist
     return next_agent
 
 
@@ -317,19 +332,7 @@ def pause_router(state):
     return intended_agent
 
 
-def worker_router(state):
-    next_agent = state.get("next_agent", "END")
-    logger.info("worker_router_called", next_agent=next_agent)
-
-    if next_agent == "END" or next_agent == "FINISH":
-        # In hierarchical mode, workers return to the Supervisor to verify progress
-        result = "SupervisorAgent"
-    else:
-        # If worker requested another tool/agent (though unlikely in this design)
-        result = next_agent
-
-    logger.info("worker_router_returns", result=result)
-    return result
+# worker_router logic merged into gate_router
 
 
 def error_router(state):
@@ -406,6 +409,7 @@ async def build_graph(saver):
             "DevTeam": "DevTeam",
             "FINISH": END,
             "END": END,
+            "SupervisorAgent": "SupervisorAgent",
         },
     )
 
@@ -421,9 +425,8 @@ async def build_graph(saver):
         },
     )
 
-    workflow.add_conditional_edges("ResearchAgent", worker_router)
-    workflow.add_conditional_edges("DataAgent", worker_router)
-    workflow.add_conditional_edges("DevTeam", worker_router)
+    # All workers flow to HITLGate -> gate_router
+    # Redundant conditional edges removed to prevent graph overhead
 
     workflow.add_conditional_edges(
         "ErrorAnalyzer",
@@ -554,11 +557,20 @@ async def run_workflow(request: RunRequest):
                 ]
 
                 # Update current_agent ONLY if it's a new node start and NOT internal
-                if kind == "on_chain_start" and node_agent:
+                if kind in ["on_chain_start", "on_node_start"] and node_agent:
                     current_agent = node_agent
                     if current_agent not in INTERNAL_NODES:
                         # Send an empty content signal so the UI knows this agent is now thinking
-                        yield f"data: {json.dumps({'agent': current_agent})}\n\n"
+                        yield f"data: {json.dumps({'agent': current_agent, 'status': 'thinking'})}\n\n"
+
+                # Capture Tool Starts for better specialist feedback
+                elif kind == "on_tool_start":
+                    tool_name = event.get("name", "Unknown Tool")
+                    tool_agent = event.get("metadata", {}).get(
+                        "langgraph_node", current_agent
+                    )
+                    if tool_agent not in INTERNAL_NODES:
+                        yield f"data: {json.dumps({'agent': tool_agent, 'status': f'Executing {tool_name}...'})}\n\n"
 
                 # Capture streaming tokens
                 elif kind == "on_chat_model_stream":
