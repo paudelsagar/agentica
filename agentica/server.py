@@ -47,9 +47,9 @@ from src.core.usage import usage_tracker
 DATABASE_STATE_PATH = os.path.join(os.path.dirname(__file__), "data", "state.db")
 
 
-def filter_supervisor_content(content: str) -> str:
+def filter_agent_content(content: str) -> str:
     """
-    Filter Supervisor content to extract only the human-readable summary.
+    Filter agent content to extract only the human-readable summary.
     Handles multiple formats:
     - "SUMMARY: text [END_SUMMARY] PLAN:..." -> extracts "text"
     - "I'll check... [END_SUMMARY] PLAN:..." -> extracts "I'll check..."
@@ -491,6 +491,8 @@ class AgentUpdate(BaseModel):
 class RunRequest(BaseModel):
     thread_id: str
     message: str
+    thinking_mode: bool = False
+    use_web: bool = True
 
 
 class ThreadRenameRequest(BaseModel):
@@ -532,6 +534,8 @@ async def run_workflow(request: RunRequest):
                     "retry_data": {},
                     "intended_agent": "",
                     "require_consensus": False,
+                    "thinking_mode": request.thinking_mode,
+                    "use_web": request.use_web,
                 },
                 config,
                 version="v2",
@@ -552,7 +556,9 @@ async def run_workflow(request: RunRequest):
                 # Update current_agent ONLY if it's a new node start and NOT internal
                 if kind == "on_chain_start" and node_agent:
                     current_agent = node_agent
-                    # Don't send empty agent change signals - wait for actual content
+                    if current_agent not in INTERNAL_NODES:
+                        # Send an empty content signal so the UI knows this agent is now thinking
+                        yield f"data: {json.dumps({'agent': current_agent})}\n\n"
 
                 # Capture streaming tokens
                 elif kind == "on_chat_model_stream":
@@ -599,6 +605,10 @@ async def run_workflow(request: RunRequest):
                         else:
                             # Direct streaming for better frontend consistency
                             if content:
+                                # Apply filtering for a cleaner experience if it looks like a supervisor/plan message
+                                # However, for direct tokens we usually can't filter easily without a buffer.
+                                # The frontend usually handles the raw stream.
+                                # But we can try a simple check if the token itself is a technical marker.
                                 yield f"data: {json.dumps({'agent': stream_agent, 'content': str(content)})}\n\n"
 
                 # Also capture tool message responses with __USER_RESPONSE__
@@ -793,7 +803,7 @@ async def get_thread_history(
                 # Filter Supervisor technical jargon using the same helper as streaming
                 if role == "assistant":
                     # Use the shared helper function to ensure consistent filtering
-                    content = filter_supervisor_content(str(content))
+                    content = filter_agent_content(str(content))
 
                 # Skip messages with empty content
                 if not str(content).strip():

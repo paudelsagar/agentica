@@ -2,7 +2,7 @@
 
 import { api } from "@/lib/api";
 import { clsx, type ClassValue } from "clsx";
-import { Bot, Check, ChevronUp, Edit2, Loader2, MessageSquare, PanelLeft, Plus, Send, Trash2, User, X } from "lucide-react";
+import { Bot, Brain, Check, ChevronLeft, ChevronRight, ChevronUp, Edit2, Globe, Loader2, MessageSquare, Plus, Send, Trash2, User } from "lucide-react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
@@ -101,6 +101,8 @@ function ChatInterface() {
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [thinkingMode, setThinkingMode] = useState(false);
+  const [webSearch, setWebSearch] = useState(true);
   const [isSessionsLoading, setIsSessionsLoading] = useState(true);
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [editingSessionName, setEditingSessionName] = useState("");
@@ -225,7 +227,14 @@ function ChatInterface() {
   const startNewChat = () => {
     setActiveThreadId(null);
     setMessages([]);
-    router.push(pathname, { scroll: false });
+    setStreamingAgent(null);
+    setIsLoading(false);
+    
+    // Clear URL params
+    const url = new URL(window.location.href);
+    url.searchParams.delete("thread");
+    router.push(url.pathname, { scroll: false });
+    
     if (window.innerWidth < 1024) {
       setIsSidebarOpen(false);
     }
@@ -237,20 +246,32 @@ function ChatInterface() {
     const threadId = activeThreadId || `thread_${Math.random().toString(36).substring(7)}`;
     const isNew = !activeThreadId;
     
-    if (isNew) {
-      setActiveThreadId(threadId);
-      const url = new URL(window.location.href);
-      url.searchParams.set("thread", threadId);
-      router.push(url.pathname + url.search, { scroll: false });
-    }
-
     const userMessage: Message = { role: "user", content: input };
     setMessages((prev) => [...prev, userMessage]);
     setInput("");
     setIsLoading(true);
+    setStreamingAgent("SupervisorAgent");
+
+    // If new thread, update URL and state immediately so the browser reflects the state
+    if (isNew) {
+      setActiveThreadId(threadId);
+      const url = new URL(window.location.href);
+      url.searchParams.set("thread", threadId);
+      router.replace(url.pathname + url.search, { scroll: false });
+
+      // Optimistic session for sidebar
+      const newSession: Session = {
+        thread_id: threadId,
+        agent: "SupervisorAgent",
+        preview: input.substring(0, 50),
+        success: true,
+        timestamp: new Date().toISOString()
+      };
+      setSessions((prev) => [newSession, ...prev]);
+    }
 
     try {
-      const response = await api.runWorkflow(threadId, input);
+      const response = await api.runWorkflow(threadId, input, thinkingMode, webSearch);
       if (!response.ok) throw new Error("Failed to run workflow");
 
       const reader = response.body?.getReader();
@@ -449,28 +470,20 @@ function ChatInterface() {
         isMounted ? "transition-transform duration-300" : "transition-none",
         isSidebarOpen ? "translate-x-0" : "-translate-x-full lg:-ml-72"
       )}>
-        <div className="p-6 border-b border-border flex items-center justify-between">
+        <div className="h-20 px-6 border-b border-border flex items-center justify-between shrink-0">
           <div className="flex items-center gap-2">
             <MessageSquare className="h-5 w-5 text-indigo-500" />
             <h2 className="font-bold text-foreground">Chat History</h2>
           </div>
           <button 
-            onClick={() => setIsSidebarOpen(false)}
-            className="p-1 rounded-lg hover:bg-accent lg:hidden"
+            onClick={startNewChat}
+            className="p-1.5 rounded-lg hover:bg-accent text-foreground/60 hover:text-indigo-500 transition-all active:scale-90"
+            title="New Thread"
           >
-            <X className="h-5 w-5" />
+            <Plus className="h-5 w-5" />
           </button>
         </div>
 
-        <div className="p-4 border-b border-border">
-          <button 
-            onClick={startNewChat}
-            className="w-full flex items-center justify-center gap-2 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl font-medium transition-all shadow-lg shadow-indigo-500/20 active:scale-95"
-          >
-            <Plus className="h-4 w-4" />
-            New Thread
-          </button>
-        </div>
 
         <div className="flex-1 overflow-y-auto p-4 space-y-2">
           {isSessionsLoading && sessions.length === 0 ? (
@@ -556,51 +569,32 @@ function ChatInterface() {
             ))
           )}
         </div>
+        
       </aside>
 
-      {/* Main Chat Area */}
-      <div className="flex-1 flex flex-col min-w-0 bg-background transition-all duration-300">
-        {/* Header */}
-        <header className="h-20 border-b border-border flex items-center justify-between px-4 md:px-8 bg-background/80 backdrop-blur-md sticky top-0 z-10">
-          <div className="flex items-center gap-4 flex-1 min-w-0">
-            <button 
-              onClick={() => setIsSidebarOpen(!isSidebarOpen)}
-              className={cn(
-                "sidebar-toggle-btn p-2 rounded-xl border border-border transition-all hover:bg-accent shrink-0",
-                isSidebarOpen && "bg-accent border-indigo-500/20 text-indigo-500"
-              )}
-              title="Toggle Sidebar"
-            >
-              <PanelLeft className="h-5 w-5" />
-            </button>
-            <div className="flex items-center gap-3 min-w-0">
-              <div className="h-10 w-10 rounded-xl bg-indigo-500/10 flex items-center justify-center shrink-0">
-                <Bot className="h-6 w-6 text-indigo-500" />
-              </div>
-              <div className="min-w-0">
-                <h1 className="font-bold text-foreground truncate">{displayTitle}</h1>
-                <p className="text-xs text-foreground/40 flex items-center gap-1.5 font-medium uppercase tracking-wider">
-                  <span className="inline-block h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                  System Online
-                </p>
-              </div>
-            </div>
-          </div>
-          
-          {activeThreadId && (
-            <button 
-              onClick={() => {
-                if (confirm("Are you sure you want to clear this thread?")) {
-                  startNewChat();
-                }
-              }}
-              className="p-2.5 rounded-xl border border-border hover:bg-red-500/10 hover:border-red-500/20 hover:text-red-500 transition-all group"
-              title="Clear Thread"
-            >
-              <Trash2 className="h-5 w-5 opacity-40 group-hover:opacity-100" />
-            </button>
+      {/* Border-mounted Toggle Button (Desktop & Tablet) */}
+      <div className={cn(
+        "hidden lg:flex absolute top-1/2 z-50 transition-all duration-300 -translate-y-1/2",
+        isSidebarOpen ? "left-72 -translate-x-1/2" : "left-0 translate-x-0 ml-1.5",
+        !isMounted && "opacity-0"
+      )}>
+        <button 
+          onClick={() => setIsSidebarOpen(!isSidebarOpen)}
+          className={cn(
+            "h-6 w-6 rounded-full bg-background border border-border flex items-center justify-center shadow-md hover:bg-accent text-foreground/60 hover:text-indigo-500 transition-all hover:scale-110 active:scale-95 group",
+            !isSidebarOpen && "border-l-0 rounded-l-none"
           )}
-        </header>
+          title={isSidebarOpen ? "Collapse Sidebar" : "Expand Sidebar"}
+        >
+          {isSidebarOpen ? (
+            <ChevronLeft className="h-3.5 w-3.5" />
+          ) : (
+            <ChevronRight className="h-3.5 w-3.5" />
+          )}
+        </button>
+      </div>
+
+      <div className="flex-1 flex flex-col min-w-0 bg-background transition-all duration-300">
 
         {/* Message Container */}
         <div 
@@ -706,10 +700,39 @@ function ChatInterface() {
 
         {/* Input */}
         <footer className="p-4 md:p-8 pt-0 bg-background/80 backdrop-blur-md">
-          <div className="max-w-4xl mx-auto relative group">
-            <div className="absolute -inset-1 bg-gradient-to-r from-indigo-500/20 to-purple-500/20 rounded-[24px] blur opacity-0 group-focus-within:opacity-100 transition-opacity" />
-            <div className="relative flex items-end gap-2 bg-card border border-border rounded-[22px] p-2 focus-within:border-indigo-500/40 focus-within:ring-2 focus-within:ring-indigo-500/10 transition-all shadow-xl shadow-indigo-500/5">
-              <textarea
+          <div className="max-w-4xl mx-auto flex flex-col gap-3">
+            {/* Toggles */}
+            <div className="flex items-center gap-2 px-1">
+              <button
+                onClick={() => setThinkingMode(!thinkingMode)}
+                className={cn(
+                  "flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium transition-all border",
+                  thinkingMode 
+                    ? "bg-indigo-500/10 border-indigo-500/30 text-indigo-400" 
+                    : "bg-muted/50 border-border text-foreground/50 hover:text-foreground/70"
+                )}
+              >
+                <Brain className={cn("h-3.5 w-3.5", thinkingMode && "animate-pulse")} />
+                Thinking Mode
+              </button>
+              <button
+                onClick={() => setWebSearch(!webSearch)}
+                className={cn(
+                  "flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium transition-all border",
+                  webSearch 
+                    ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-400" 
+                    : "bg-muted/50 border-border text-foreground/50 hover:text-foreground/70"
+                )}
+              >
+                <Globe className="h-3.5 w-3.5" />
+                Web Search
+              </button>
+            </div>
+
+            <div className="relative group">
+              <div className="absolute -inset-1 bg-gradient-to-r from-indigo-500/20 to-purple-500/20 rounded-[24px] blur opacity-0 group-focus-within:opacity-100 transition-opacity" />
+              <div className="relative flex items-end gap-2 bg-card border border-border rounded-[22px] p-2 focus-within:border-indigo-500/40 focus-within:ring-2 focus-within:ring-indigo-500/10 transition-all shadow-xl shadow-indigo-500/5">
+                <textarea
                 rows={1}
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
@@ -722,13 +745,14 @@ function ChatInterface() {
                 placeholder="Message Agentica..."
                 className="flex-1 bg-transparent border-none outline-none focus:ring-0 focus:outline-none text-foreground placeholder:text-foreground/40 py-3 px-4 resize-none min-h-[50px] max-h-[200px]"
               />
-              <button
-                onClick={handleSend}
-                disabled={!input.trim() || isLoading}
-                className="h-12 w-12 flex items-center justify-center rounded-xl bg-indigo-600 text-white hover:bg-indigo-500 disabled:opacity-50 disabled:hover:bg-indigo-600 transition-all shadow-lg shadow-indigo-500/20 active:scale-95"
-              >
-                {isLoading ? <Loader2 className="h-5 w-5 animate-spin" /> : <Send className="h-5 w-5" />}
-              </button>
+                <button
+                  onClick={handleSend}
+                  disabled={!input.trim() || isLoading}
+                  className="h-12 w-12 flex items-center justify-center rounded-xl bg-indigo-600 text-white hover:bg-indigo-500 disabled:opacity-50 disabled:hover:bg-indigo-600 transition-all shadow-lg shadow-indigo-500/20 active:scale-95"
+                >
+                  {isLoading ? <Loader2 className="h-5 w-5 animate-spin" /> : <Send className="h-5 w-5" />}
+                </button>
+              </div>
             </div>
           </div>
         </footer>

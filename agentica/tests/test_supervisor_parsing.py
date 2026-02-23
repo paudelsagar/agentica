@@ -17,6 +17,7 @@ def mock_supervisor_init(self):
     # Mock base class methods
     self._recall_context = AsyncMock(return_value="")
     self._reflect_and_store = AsyncMock()
+    self.tool_functions = {}
 
 
 @pytest.mark.asyncio

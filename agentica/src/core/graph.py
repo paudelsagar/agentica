@@ -23,6 +23,8 @@ class AgentState(TypedDict):
     retry_data: Annotated[Dict[str, int], lambda a, b: {**a, **b}]
     intended_agent: str
     require_consensus: bool
+    thinking_mode: bool
+    use_web: bool
 
 
 # We will define the graph builder here, but nodes will be added dynamically

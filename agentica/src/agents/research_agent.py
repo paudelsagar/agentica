@@ -36,20 +36,39 @@ class ResearchAgent(Agentica):
                 )
                 first_title = results[0].get("title", "").lower()
 
-                # Critical keywords that MUST be in the result if they are in the query
-                critical_keywords = [
-                    "kathmandu",
-                    "nepal",
-                    "weather",
-                    "temperature",
-                    "forecast",
-                ]
-                q_lower = q.lower()
-                for kw in critical_keywords:
-                    if kw in q_lower and (
-                        kw not in first_body and kw not in first_title
+                # Basic heuristic: remove stop words and punctuation
+                import re
+
+                words = set(re.findall(r"\b[a-z]{3,}\b", q.lower()))
+                stop_words = {
+                    "what",
+                    "who",
+                    "when",
+                    "where",
+                    "why",
+                    "how",
+                    "the",
+                    "and",
+                    "for",
+                    "with",
+                    "are",
+                    "is",
+                    "of",
+                    "in",
+                    "to",
+                    "current",
+                    "latest",
+                    "about",
+                }
+                meaningful_words = words - stop_words
+
+                # If there are meaningful words, at least ONE should be in the result
+                if meaningful_words:
+                    if not any(
+                        word in first_body or word in first_title
+                        for word in meaningful_words
                     ):
-                        return True  # Missing a critical keyword from the query
+                        return True
 
                 return False
 
@@ -101,10 +120,13 @@ class ResearchAgent(Agentica):
             if not results:
                 return "No reliable results found. Suggest trying keywords like 'temperature' or 'forecast'."
 
-            formatted = []
-            for r in results:
+            formatted = [f"Found {len(results)} relevant results for '{query}':\n"]
+            for i, r in enumerate(results):
+                title = r.get("title")
+                snippet = r.get("body") or r.get("snippet")
+                source = r.get("href") or r.get("link")
                 formatted.append(
-                    f"Title: {r.get('title')}\nSnippet: {r.get('body') or r.get('snippet')}\nSource: {r.get('href') or r.get('link')}"
+                    f"{i+1}. {title}\n   Snippet: {snippet}\n   Source: {source}"
                 )
             return "\n\n".join(formatted)
 

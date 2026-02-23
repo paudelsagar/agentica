@@ -102,7 +102,7 @@ DEFAULT_MODEL_MAPPINGS = {
     "google": {"fast": "gemini-2.0-flash", "heavy": "gemini-2.0-flash"},
     "openai": {"fast": "gpt-4o-mini", "heavy": "gpt-4o"},
     "xai": {"fast": "grok-beta", "heavy": "grok-beta"},
-    "ollama": {"fast": "qwen3:8b", "heavy": "qwen3:8b"},
+    "ollama": {"fast": "glm-4.7:cloud", "heavy": "glm-4.7:cloud"},
 }
 
 DEFAULT_MCP_SERVERS = {

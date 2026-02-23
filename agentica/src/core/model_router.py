@@ -31,7 +31,11 @@ class ModelRouter:
             logger.error("failed_to_load_model_config_from_db", error=str(e))
             # Fallback to hardcoded defaults if critical
             self.tier_mappings = {
-                "google": {"heavy": "gemini-2.0-flash", "fast": "gemini-2.0-flash"}
+                "google": {
+                    "heavy": "gemini-2.0-flash",
+                    "fast": "gemini-2.0-flash",
+                    "thinking": "gemini-2.0-flash-thinking-exp-01-21",
+                }
             }
 
     async def update_mapping(self, provider: str, tier: str, model: str):

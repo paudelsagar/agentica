@@ -8,6 +8,7 @@ from src.core.agent import Agentica, AgenticaConfig
 from src.core.config import load_agent_config
 from src.core.consensus import Vote
 from src.core.logger import get_logger
+from src.core.model_router import model_router
 from src.core.registry import tool_registry
 from src.core.usage import usage_tracker
 
@@ -52,38 +53,37 @@ class SupervisorAgent(Agentica):
         # 1. Proactive RAG: Recall context
         recalled_context = await self._recall_context(messages)
 
-        # 2. Logic Guard: Force delegation for known real-time keywords to help smaller models
-        # BREAK LOOP: Only force if we don't already have results from ResearchAgent
-        has_research_results = any(
-            getattr(m, "name", "") == "ResearchAgent"
-            or "ResearchAgent" in str(m.content)
-            for m in messages
-        )
-
-        last_user_msg = ""
-        for m in reversed(messages):
-            if isinstance(m, HumanMessage):
-                last_user_msg = str(m.content).lower()
+        # 2. Logic Guard: Force delegation for known real-time patterns
+        # BREAK LOOP: Check for research results robustly
+        has_research_results = False
+        for m in messages:
+            name = getattr(m, "name", "") or m.additional_kwargs.get("name", "")
+            if name == "ResearchAgent":
+                has_research_results = True
+                break
+            # Fallback check for content indicators if name is wiped
+            content = str(m.content).upper()
+            if "RESEARCHAGENT" in content and (
+                "BASED ON MY SEARCH" in content or "FOUND THE FOLLOWING" in content
+            ):
+                has_research_results = True
                 break
 
+        # Check for dynamic needs (e.g., current events) using a simplified, generic guard
+        # or completely omit static lists in favor of system prompt instructions.
         delegation_guard = ""
-        if not has_research_results and any(
-            kw in last_user_msg
-            for kw in [
-                "weather",
-                "temperature",
-                "forecast",
-                "news",
-                "current",
-                "search",
-                "who is",
-                "what is",
-            ]
-        ):
-            delegation_guard = "\n\nCRITICAL: The user is asking for real-time info. You MUST delegate to ResearchAgent for this initial step. DO NOT attempt to answer yourself."
+        use_web = state.get("use_web", True)
+        if not has_research_results and use_web:
+            # We add a subtle reminder, but leave the actual routing decision to the LLM
+            delegation_guard = "\n\nCRITICAL THINKING: If the user requires real-time information, current facts, or external searches, you MUST delegate to ResearchAgent for the initial step. DO NOT attempt to answer questions about the world without searching first."
+        elif not use_web:
+            delegation_guard = "\n\nCRITICAL: Web search is currently DISABLED. DO NOT delegate to ResearchAgent. Use your internal knowledge only."
 
         # 3. Update System Prompt with plan, tools, and context
         all_tools = tool_registry.list_tools()
+        if not use_web:
+            all_tools = [t for t in all_tools if t.owner_agent != "ResearchAgent"]
+
         tools_str = "\n".join(
             [f"- {t.name} (Owner: {t.owner_agent}): {t.description}" for t in all_tools]
         )
@@ -136,8 +136,18 @@ class SupervisorAgent(Agentica):
         wait_count = 0
         require_consensus = False
 
+        # 3.1 Determine which LLM to use (check thinking mode)
+        current_llm = self.llm
+        if state.get("thinking_mode"):
+            self.log.info("thinking_mode_enabled_switching_to_thinking_tier")
+            current_llm = model_router.get_model(
+                tier_or_name="thinking",
+                provider=self.config.model_provider,
+                temperature=0,
+            )
+
         try:
-            response = await self.llm.ainvoke(messages, config=config)
+            response = await current_llm.ainvoke(messages, config=config)
             response.name = self.config.name  # Set agent name for history
             content = response.content
             self.log.info("supervisor_raw_response", content=content)
@@ -172,9 +182,7 @@ class SupervisorAgent(Agentica):
 
             # If no match, fallback to simple lookup ONLY if we don't have results already
             has_research_results = any(
-                getattr(m, "name", "") == "ResearchAgent"
-                or "ResearchAgent" in str(m.content)
-                for m in messages
+                getattr(m, "name", "") == "ResearchAgent" for m in messages
             )
 
             if temp_next_agent == ["FINISH"] and "FINISH" not in content_upper:

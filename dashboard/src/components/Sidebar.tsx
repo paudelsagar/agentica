@@ -35,7 +35,7 @@ export function Sidebar() {
 
   return (
     <div className="flex h-screen w-64 flex-col border-r border-border bg-card">
-      <div className="flex h-20 items-center justify-between px-6">
+      <div className="flex h-20 items-center justify-between px-6 border-b border-border">
         <div className="flex items-center gap-3">
           <div className="h-8 w-8 rounded-lg bg-indigo-600 flex items-center justify-center font-bold text-white shadow-lg shadow-indigo-500/20">
             A
@@ -45,7 +45,7 @@ export function Sidebar() {
         <ThemeToggle />
       </div>
 
-      <nav className="flex-1 space-y-1 px-4 py-4">
+      <nav className="flex-1 min-h-0 overflow-y-auto space-y-1 px-4 py-4 scroll-smooth">
         {navItems.map((item) => {
           const isActive = pathname === item.href;
           return (
@@ -69,15 +69,6 @@ export function Sidebar() {
         })}
       </nav>
 
-      <div className="p-4 border-t border-border">
-        <div className="rounded-xl bg-accent/50 p-4">
-          <p className="text-xs font-medium text-foreground/40 uppercase tracking-wider mb-2">Backend Status</p>
-          <div className="flex items-center gap-2">
-            <div className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
-            <span className="text-sm font-medium text-foreground/80">Online</span>
-          </div>
-        </div>
-      </div>
     </div>
   );
 }

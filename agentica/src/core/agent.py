@@ -289,9 +289,16 @@ class Agentica:
         # 0. Cognitive Budget Check (Phase 15)
         await load_monitor.check_budget(thread_id)
 
-        # 0.1 Predictive Scaling (Phase 19)
+        # 0.1 Predictive Scaling & Thinking Mode (Phase 19)
         current_llm = self.llm
-        if self.config.model_tier == "fast":
+        if state.get("thinking_mode"):
+            self.log.info("thinking_mode_enabled_switching_to_thinking_tier")
+            current_llm = model_router.get_model(
+                tier_or_name="thinking",
+                provider=self.config.model_provider,
+                temperature=0,
+            )
+        elif self.config.model_tier == "fast":
             optimal_tier = await model_router.get_optimal_tier(
                 self.config.name, self.config.model_provider
             )
@@ -353,7 +360,11 @@ class Agentica:
 
         try:
             response = await llm_with_tools.ainvoke(sanitized_messages, config=config)
-            response.name = self.config.name  # Set agent name for history
+            # Ensure name is set in both the attribute and additional_kwargs for persistence
+            response.name = self.config.name
+            if not response.additional_kwargs:
+                response.additional_kwargs = {}
+            response.additional_kwargs["name"] = self.config.name
         except Exception as e:
             error_msg = str(e)
             self.log.error("llm_invocation_failed", error=error_msg)
