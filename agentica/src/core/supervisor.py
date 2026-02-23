@@ -1,7 +1,7 @@
 import re
 from typing import Any, Dict, List, Literal, Optional
 
-from langchain_core.messages import AIMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 from pydantic import BaseModel
 from src.core.agent import Agentica, AgenticaConfig
@@ -43,10 +43,46 @@ class SupervisorAgent(Agentica):
         plan = state.get("plan", [])
         plan_step = state.get("plan_step", 0)
 
+        # 0. Prune history to avoid bias from previous failures (8B models are sensitive)
+        if len(messages) > 6:
+            # Keep the first (often the first human message) and the last 5
+            messages = [messages[0]] + messages[-5:]
+            self.log.info("pruned_supervisor_history", kept=len(messages))
+
         # 1. Proactive RAG: Recall context
         recalled_context = await self._recall_context(messages)
 
-        # 2. Update System Prompt with plan, tools, and context
+        # 2. Logic Guard: Force delegation for known real-time keywords to help smaller models
+        # BREAK LOOP: Only force if we don't already have results from ResearchAgent
+        has_research_results = any(
+            getattr(m, "name", "") == "ResearchAgent"
+            or "ResearchAgent" in str(m.content)
+            for m in messages
+        )
+
+        last_user_msg = ""
+        for m in reversed(messages):
+            if isinstance(m, HumanMessage):
+                last_user_msg = str(m.content).lower()
+                break
+
+        delegation_guard = ""
+        if not has_research_results and any(
+            kw in last_user_msg
+            for kw in [
+                "weather",
+                "temperature",
+                "forecast",
+                "news",
+                "current",
+                "search",
+                "who is",
+                "what is",
+            ]
+        ):
+            delegation_guard = "\n\nCRITICAL: The user is asking for real-time info. You MUST delegate to ResearchAgent for this initial step. DO NOT attempt to answer yourself."
+
+        # 3. Update System Prompt with plan, tools, and context
         all_tools = tool_registry.list_tools()
         tools_str = "\n".join(
             [f"- {t.name} (Owner: {t.owner_agent}): {t.description}" for t in all_tools]
@@ -54,6 +90,7 @@ class SupervisorAgent(Agentica):
         tool_discovery_prompt = (
             f"\n\nAVAILABLE TOOLS IN SYSTEM:\n{tools_str}" if all_tools else ""
         )
+        self.log.info("discovered_tools", count=len(all_tools), tools=tools_str)
 
         consensus_instr = (
             "\n\nCRITICAL DECISIONS: If a step is high-risk (e.g., destructive actions), "
@@ -70,20 +107,31 @@ class SupervisorAgent(Agentica):
         )
         context_prompt = f"\n\nCURRENT PLAN:\n{plan_str}\nCURRENT STEP: {plan_step + 1}"
 
-        system_content = (
+        self.system_content = (
             (self.config.system_prompt or "")
             + tool_discovery_prompt
             + consensus_instr
             + context_prompt
             + recalled_context
+            + delegation_guard
+            + "\n\nCRITICAL: Your response MUST begin with a 'SUMMARY:' section "
+            "intended for the user. Even if you are delegating, explain to the human "
+            "what you are doing and why. NEVER leave the summary empty."
         )
         self.log.info(
-            "consolidated_system_prompt", content_preview=system_content[:200]
+            "consolidated_system_prompt", content_preview=self.system_content[:200]
         )
-        system_msg = SystemMessage(content=system_content)
+        # Filter out any existing SystemMessages to avoid redundant/conflicting instructions
+        messages = [m for m in messages if not isinstance(m, SystemMessage)]
+
+        system_msg = SystemMessage(content=self.system_content)
         messages = [system_msg] + messages
 
         self.log.info("supervisor_deciding_next_step", step=plan_step)
+
+        # 3. Sanitize history for strict role alternation/trailing messages
+        messages = await self._sanitize_history(messages)
+
         next_agent = ["FINISH"]
         wait_count = 0
         require_consensus = False
@@ -94,13 +142,92 @@ class SupervisorAgent(Agentica):
             content = response.content
             self.log.info("supervisor_raw_response", content=content)
 
-            # 3. Extract parts: SUMMARY, PLAN, NEXT AGENT
+            # 4. Multi-agent parsing (Moved UP)
+            content_upper = content.upper()
+            temp_next_agent = ["FINISH"]
+            agent_matches = re.findall(r"NEXT AGENT:\s*(.*)", content, re.IGNORECASE)
+
+            if agent_matches:
+                parsed_agents = []
+                for match in agent_matches:
+                    targets_str = match.split("\n")[0].upper()
+                    targets = [t.strip() for t in targets_str.split(",") if t.strip()]
+
+                    for target in targets:
+                        if "RESEARCH" in target:
+                            parsed_agents.append("ResearchAgent")
+                        elif "CODER" in target:
+                            parsed_agents.append("CoderAgent")
+                        elif "REVIEW" in target:
+                            parsed_agents.append("ReviewerAgent")
+                        elif "DATA" in target or "DATABASE" in target:
+                            parsed_agents.append("DataAgent")
+                        elif "DEVTEAM" in target or "DEVELOPMENT" in target:
+                            parsed_agents.append("DevTeam")
+                        elif "FINISH" in target:
+                            parsed_agents.append("FINISH")
+
+                if parsed_agents:
+                    temp_next_agent = list(dict.fromkeys(parsed_agents))
+
+            # If no match, fallback to simple lookup ONLY if we don't have results already
+            has_research_results = any(
+                getattr(m, "name", "") == "ResearchAgent"
+                or "ResearchAgent" in str(m.content)
+                for m in messages
+            )
+
+            if temp_next_agent == ["FINISH"] and "FINISH" not in content_upper:
+                if (
+                    not has_research_results
+                ):  # Prevent falling back into a loop if we already have the answer
+                    if "RESEARCHAGENT" in content_upper:
+                        temp_next_agent = ["ResearchAgent"]
+                    elif "DATAAGENT" in content_upper:
+                        temp_next_agent = ["DataAgent"]
+                    elif "CODERAGENT" in content_upper:
+                        temp_next_agent = ["CoderAgent"]
+                    elif "REVIEWERAGENT" in content_upper:
+                        temp_next_agent = ["ReviewerAgent"]
+
+            # HARD LOOP PREVENTION: Force FINISH if we just got back from a worker
+            # and the model is trying to re-delegate helplessly.
+            if has_research_results:
+                self.log.info(
+                    "forcing_finish_to_prevent_loop", original=temp_next_agent
+                )
+                temp_next_agent = ["FINISH"]
+
+            next_agent = temp_next_agent
+
+            # 5. Extract parts: SUMMARY and Override
             summary_match = re.search(
-                r"SUMMARY:(.*?)(?=\[END_SUMMARY\]|PLAN:|$)",
+                r"SUMMARY:(.*?)(?=\[END_SUMMARY\]|PLAN:|NEXT AGENT:|$)",
                 content,
                 re.DOTALL | re.IGNORECASE,
             )
             summary = summary_match.group(1).strip() if summary_match else ""
+
+            # If NEXT AGENT is present but no SUMMARY, use everything before NEXT AGENT
+            if not summary and next_agent != ["FINISH"]:
+                parts = re.split(r"NEXT AGENT:", content, flags=re.IGNORECASE)
+                if len(parts) > 1 and len(parts[0].strip()) > 10:
+                    summary = parts[0].strip()
+                    # If the accidental summary contains refusal phrases, override it
+                    if any(
+                        kw in summary.lower()
+                        for kw in ["unable", "cannot", "sorry", "nmda.gov.np"]
+                    ):
+                        summary = f"I am delegating to {', '.join(next_agent)} to fetch the information you requested."
+                else:
+                    summary = f"I am coordinating with {', '.join(next_agent)} to handle your request."
+
+            # Final fallback for any refusal in ANY summary
+            if any(
+                kw in summary.lower()
+                for kw in ["unable", "cannot", "sorry", "nmda.gov.np"]
+            ) and next_agent != ["FINISH"]:
+                summary = f"I've delegated the search to {', '.join(next_agent)} to get you the latest information."
 
             # 3. Automated Reflection: Store info in memory
             await self._reflect_and_store(messages, content)
@@ -144,38 +271,7 @@ class SupervisorAgent(Agentica):
                     plan = new_plan
                     plan_step = 0  # reset if plan changed
 
-            # Multi-agent parsing
-            content_upper = content.upper()
-            next_agent = ["FINISH"]
-            agent_matches = re.findall(r"NEXT AGENT:\s*(.*)", content, re.IGNORECASE)
-
-            if agent_matches:
-                parsed_agents = []
-                for match in agent_matches:
-                    targets_str = match.split("\n")[0].upper()
-                    targets = [t.strip() for t in targets_str.split(",") if t.strip()]
-
-                    for target in targets:
-                        if "RESEARCH" in target:
-                            parsed_agents.append("ResearchAgent")
-                        elif "CODER" in target:
-                            parsed_agents.append("CoderAgent")
-                        elif "REVIEW" in target:
-                            parsed_agents.append("ReviewerAgent")
-                        elif "DATA" in target or "DATABASE" in target:
-                            parsed_agents.append("DataAgent")
-                        elif "DEVTEAM" in target or "DEVELOPMENT" in target:
-                            parsed_agents.append("DevTeam")
-                        elif "FINISH" in target:
-                            parsed_agents.append("FINISH")
-
-                if parsed_agents:
-                    next_agent = list(dict.fromkeys(parsed_agents))  # Remove duplicates
-
-            # If no match, fallback to simple lookup
-            if next_agent == ["FINISH"] and "FINISH" not in content_upper:
-                if "RESEARCHAGENT" in content_upper:
-                    next_agent = ["ResearchAgent"]
+                # Replaced by moved block
                 elif "CODERAGENT" in content_upper:
                     next_agent = ["CoderAgent"]
                 elif "REVIEWERAGENT" in content_upper:

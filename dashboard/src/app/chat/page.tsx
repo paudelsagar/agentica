@@ -23,7 +23,9 @@ function filterAgentContent(content: string): string {
   // If SUMMARY: exists, extract content after it
   const summaryMatch = filtered.toUpperCase().indexOf("SUMMARY:");
   if (summaryMatch !== -1) {
-    filtered = filtered.substring(summaryMatch + 8); // 8 = length of "SUMMARY:"
+    const afterPrefix = filtered.substring(summaryMatch + 8);
+    // If it starts with a colon and space or just a colon, handle it
+    filtered = afterPrefix.trimStart();
   }
   
   // Find the earliest technical marker and cut there
@@ -288,7 +290,7 @@ function ChatInterface() {
                   // Only create bubble if content is non-empty after filtering
                   const filteredContent = filterAgentContent(assistantContent);
                   if (filteredContent.trim()) {
-                    setMessages((prev) => [...prev, { role: "assistant", content: filteredContent, agent: currentStreamingAgent }]);
+                    setMessages((prev) => [...prev, { role: "assistant", content: filteredContent, agent: currentStreamingAgent || undefined }]);
                   }
                 } else {
                   // Continuing existing agent's bubble
@@ -303,7 +305,7 @@ function ChatInterface() {
                         return [...prev.slice(0, lastIdx), { ...prev[lastIdx], content: filteredContent }];
                       } else {
                         // No existing bubble for this agent, create one
-                        return [...prev, { role: "assistant", content: filteredContent, agent: currentStreamingAgent }];
+                        return [...prev, { role: "assistant", content: filteredContent, agent: currentStreamingAgent || undefined }];
                       }
                     });
                   }

@@ -126,6 +126,7 @@ class ModelRouter:
                 model=model_name,
                 temperature=temperature,
                 base_url=base_url,
+                streaming=True,
             )
 
         raise ValueError(f"Unsupported provider: {provider}")

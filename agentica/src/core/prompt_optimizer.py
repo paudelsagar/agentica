@@ -22,8 +22,8 @@ class PromptOptimizer:
             )
             db_path = os.path.join(root_dir, "data", "state.db")
         self.db_path = db_path
-        # Use a heavy model for optimization reasoning
-        self.optimizer_llm = model_router.get_model(tier_or_name="heavy")
+        # Use a heavy model for optimization reasoning, initialized lazily
+        self._optimizer_llm = None
 
     async def fetch_negatives(
         self, agent_name: str, limit: int = 5
@@ -109,7 +109,10 @@ Return ONLY the new full system prompt. Do not include any explanation or marker
 
         from langchain_core.messages import HumanMessage
 
-        response = await self.optimizer_llm.ainvoke(
+        if self._optimizer_llm is None:
+            self._optimizer_llm = model_router.get_model(tier_or_name="heavy")
+
+        response = await self._optimizer_llm.ainvoke(
             [HumanMessage(content=optimization_instruction)]
         )
 

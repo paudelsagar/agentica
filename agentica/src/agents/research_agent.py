@@ -17,30 +17,96 @@ class ResearchAgent(Agentica):
         self._register_tools()
 
     def _register_tools(self):
-        from langchain_community.tools import DuckDuckGoSearchRun
-
-        # Search Tool
         try:
-            search_tool = DuckDuckGoSearchRun()
-        except:
-            # Fallback if dependencies missing or network fails init?
-            # But here we just init the class.
-            search_tool = None
+            from duckduckgo_search import DDGS
+        except ImportError:
+            self.log.error("duckduckgo_search_not_installed")
 
         def web_search(query: str) -> str:
             """
-            Performs a web search using DuckDuckGo.
+            Performs a web search with multi-layered fallbacks.
             """
-            if not search_tool:
-                return "Search tool unavailable."
+            self.log.info(f"Performing layered web search for: {query}")
 
-            self.log.info(f"Performing real web search for: {query}")
+            def is_junk(results, q):
+                if not results:
+                    return True
+                first_body = (
+                    results[0].get("body", results[0].get("snippet", "")).lower()
+                )
+                first_title = results[0].get("title", "").lower()
+
+                # Critical keywords that MUST be in the result if they are in the query
+                critical_keywords = [
+                    "kathmandu",
+                    "nepal",
+                    "weather",
+                    "temperature",
+                    "forecast",
+                ]
+                q_lower = q.lower()
+                for kw in critical_keywords:
+                    if kw in q_lower and (
+                        kw not in first_body and kw not in first_title
+                    ):
+                        return True  # Missing a critical keyword from the query
+
+                return False
+
+            def do_search_text(ddgs, q):
+                try:
+                    res = list(ddgs.text(q, max_results=5))
+                    return [] if is_junk(res, q) else res
+                except Exception:
+                    return []
+
+            def do_search_news(ddgs, q):
+                try:
+                    res = list(ddgs.news(q, max_results=5))
+                    return [] if is_junk(res, q) else res
+                except Exception:
+                    return []
+
+            results = []
             try:
-                return search_tool.invoke(query)
+                with DDGS() as ddgs:
+                    # Strategy 1: Primary Text Search
+                    results = do_search_text(ddgs, query)
+
+                    # Strategy 2: Weather-specific fallback (use News)
+                    if not results and (
+                        "weather" in query.lower() or "temperature" in query.lower()
+                    ):
+                        self.log.info(
+                            "Primary text search failed for weather. Trying News..."
+                        )
+                        results = do_search_news(ddgs, query)
+
+                    # Strategy 3: Query rephrasing fallback
+                    if not results and "weather" in query.lower():
+                        fallback = query.lower().replace(
+                            "weather", "temperature report"
+                        )
+                        self.log.info(f"Trying rephrased fallback: {fallback}")
+                        results = do_search_text(ddgs, fallback)
+
+                    # Strategy 4: Broad News Search
+                    if not results:
+                        self.log.info("Still no results. Trying broad news search...")
+                        results = do_search_news(ddgs, f"{query} report")
             except Exception as e:
-                self.log.error(f"Error in web_search: {e}")
-                # Fallback to a mock response if real search fails (e.g. network issues in some envs)
-                return f"Error in search engine: {e}"
+                self.log.error(f"DDGS failure: {e}")
+                return f"Search engine error: {e}"
+
+            if not results:
+                return "No reliable results found. Suggest trying keywords like 'temperature' or 'forecast'."
+
+            formatted = []
+            for r in results:
+                formatted.append(
+                    f"Title: {r.get('title')}\nSnippet: {r.get('body') or r.get('snippet')}\nSource: {r.get('href') or r.get('link')}"
+                )
+            return "\n\n".join(formatted)
 
         def summarize(content: str) -> str:
             """

@@ -16,14 +16,8 @@ class MemoryManager:
 
     def __init__(self, collection_name: str = "agent_memory"):
         self.collection_name = collection_name
-
-        # Ensure GOOGLE_API_KEY is available
-        if not os.getenv("GOOGLE_API_KEY"):
-            logger.warning("GOOGLE_API_KEY not found. Memory features may fail.")
-
-        self.embeddings = GoogleGenerativeAIEmbeddings(
-            model="models/gemini-embedding-001"
-        )
+        self.embeddings = None
+        self.vector_store = None
 
         # Persist directory
         self.persist_directory = os.path.join(
@@ -32,22 +26,36 @@ class MemoryManager:
             "chroma_db",
         )
 
+    def _ensure_initialized(self) -> bool:
+        if self.vector_store is not None:
+            return True
+        if not os.getenv("GOOGLE_API_KEY"):
+            logger.warning(
+                "GOOGLE_API_KEY not found. Memory features will be disabled."
+            )
+            return False
+
         try:
+            self.embeddings = GoogleGenerativeAIEmbeddings(
+                model="models/gemini-embedding-001"
+            )
             self.vector_store = Chroma(
-                collection_name=collection_name,
+                collection_name=self.collection_name,
                 embedding_function=self.embeddings,
                 persist_directory=self.persist_directory,
             )
+            return True
         except Exception as e:
             logger.error("failed_to_initialize_chroma", error=str(e))
             self.vector_store = None
+            return False
 
     def add_memory(self, text: str, metadata: Optional[dict] = None) -> str:
         """
         Adds a text to the memory.
         """
-        if not self.vector_store:
-            return "Memory unavailable."
+        if not self._ensure_initialized():
+            return "Memory unavailable. GOOGLE_API_KEY required."
 
         logger.info("adding_memory", text_preview=text[:50])
         try:

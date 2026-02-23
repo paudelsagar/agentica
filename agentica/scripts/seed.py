@@ -11,7 +11,7 @@ DEFAULT_AGENTS = {
         "name": "ResearchAgent",
         "role": "Researcher",
         "capabilities": ["web_search", "summarization"],
-        "model_provider": "google",
+        "model_provider": "ollama",
         "model_tier": "heavy",
         "system_prompt": """You are a senior researcher. ALWAYS use the 'web_search' tool to find real-time information or answer general questions.
 
@@ -35,7 +35,7 @@ Do NOT include raw JSON, tool output, or internal notes in respond_to_user - onl
             "Writing detailed technical documentation",
             "Executing code in a sandboxed environment",
         ],
-        "model_provider": "google",
+        "model_provider": "ollama",
         "model_tier": "heavy",
         "system_prompt": "You are an expert software engineer. Your goal is to write high-quality, efficient, and secure code. You can use the 'write_code' tool to create files and 'execute_code' to run them. DYNAMIC TOOL CREATION: If you need a reusable utility that is NOT available, you can create it using the 'create_tool' tool. ALWAYS verify your code works by creating a small test script if possible. SELF-HEALING: If you receive an 'ALERT:' message, analyze the error carefully and fix it.",
     },
@@ -47,7 +47,7 @@ Do NOT include raw JSON, tool output, or internal notes in respond_to_user - onl
             "Security Auditing",
             "Best Practices Enforcement",
         ],
-        "model_provider": "google",
+        "model_provider": "ollama",
         "model_tier": "heavy",
         "system_prompt": "You are a strict code reviewer. Critique the code provided by the CoderAgent. Check for bugs, security vulnerabilities, efficiency, and style. If the code is good, reply with 'APPROVE'. If there are issues, list them clearly with 'REQUEST_CHANGES'.",
     },
@@ -55,7 +55,7 @@ Do NOT include raw JSON, tool output, or internal notes in respond_to_user - onl
         "name": "DataAgent",
         "role": "Database Specialist",
         "capabilities": ["sql_query", "database_management"],
-        "model_provider": "google",
+        "model_provider": "ollama",
         "model_tier": "fast",
         "system_prompt": "You are a database specialist. Use your SQL tools to query the database and answer questions about the data. SELF-HEALING: If you receive an 'ALERT:' message, analyze the SQL syntax error and provide a corrected query.",
     },
@@ -63,7 +63,7 @@ Do NOT include raw JSON, tool output, or internal notes in respond_to_user - onl
         "name": "DevLeadAgent",
         "role": "Engineering Lead",
         "capabilities": ["Technical Leadership", "Code Review Coordination"],
-        "model_provider": "google",
+        "model_provider": "ollama",
         "model_tier": "heavy",
         "system_prompt": "You are the Technical Lead of the Development Team. Manage CoderAgent and ReviewerAgent. Delegate implementation to Coder and review to Reviewer. Once approved, output 'FINAL_RESULT: [Summary]'.",
     },
@@ -71,7 +71,7 @@ Do NOT include raw JSON, tool output, or internal notes in respond_to_user - onl
         "name": "SupervisorAgent",
         "role": "Project Manager",
         "capabilities": ["Task Delegation", "Workflow Orchestration"],
-        "model_provider": "google",
+        "model_provider": "ollama",
         "model_tier": "heavy",
         "system_prompt": """You are the Project Manager and Lead Architect. Your role is to coordinate other agents.
 You MUST NOT attempt to use tools directly (e.g., do not write 'web_search(...)'). Instead, delegate tasks.
@@ -102,7 +102,7 @@ DEFAULT_MODEL_MAPPINGS = {
     "google": {"fast": "gemini-2.0-flash", "heavy": "gemini-2.0-flash"},
     "openai": {"fast": "gpt-4o-mini", "heavy": "gpt-4o"},
     "xai": {"fast": "grok-beta", "heavy": "grok-beta"},
-    "ollama": {"fast": "llama3.2", "heavy": "llama3.1"},
+    "ollama": {"fast": "qwen3:8b", "heavy": "qwen3:8b"},
 }
 
 DEFAULT_MCP_SERVERS = {
@@ -185,6 +185,9 @@ async def seed():
             "OPENAI_API_KEY",
             "ANTHROPIC_API_KEY",
             "XAI_API_KEY",
+            "COHERE_API_KEY",
+            "TAVILY_API_KEY",
+            "OLLAMA_BASE_URL",
         ]
         for key in secrets:
             val = os.getenv(key)

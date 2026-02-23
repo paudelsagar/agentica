@@ -597,17 +597,9 @@ async def run_workflow(request: RunRequest):
                                     yield f"data: {json.dumps({'agent': stream_agent, 'content': new_content})}\n\n"
                                     last_yielded_content[stream_agent] = user_content
                         else:
-                            # Fallback: use marker-based filtering for agents that haven't adopted tool yet
-                            filtered = filter_supervisor_content(buffer)
-                            if filtered and len(filtered) > len(
-                                last_yielded_content[stream_agent]
-                            ):
-                                new_content = filtered[
-                                    len(last_yielded_content[stream_agent]) :
-                                ]
-                                if new_content.strip():
-                                    yield f"data: {json.dumps({'agent': stream_agent, 'content': new_content})}\n\n"
-                                    last_yielded_content[stream_agent] = filtered
+                            # Direct streaming for better frontend consistency
+                            if content:
+                                yield f"data: {json.dumps({'agent': stream_agent, 'content': str(content)})}\n\n"
 
                 # Also capture tool message responses with __USER_RESPONSE__
                 elif kind == "on_tool_end":
@@ -988,7 +980,15 @@ async def update_agent_model(agent_name: str, update: AgentModelUpdate):
 async def get_secrets_status():
     """Returns the status of known API keys (Set/Not Set). Values are masked."""
     secrets = await db_manager.get_all_secrets()
-    keys = ["GOOGLE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "XAI_API_KEY"]
+    keys = [
+        "GOOGLE_API_KEY",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "XAI_API_KEY",
+        "COHERE_API_KEY",
+        "TAVILY_API_KEY",
+        "OLLAMA_BASE_URL",
+    ]
     status = {}
     for key in keys:
         val = secrets.get(key)
@@ -1009,6 +1009,9 @@ async def update_secrets(secrets: Dict[str, str]):
         "OPENAI_API_KEY",
         "ANTHROPIC_API_KEY",
         "XAI_API_KEY",
+        "COHERE_API_KEY",
+        "TAVILY_API_KEY",
+        "OLLAMA_BASE_URL",
     ]
     for key, val in secrets.items():
         if key not in allowed_keys:

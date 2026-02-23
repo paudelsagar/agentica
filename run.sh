@@ -171,6 +171,37 @@ status() {
     fi
 }
 
+setup() {
+    echo "Setting up backend..."
+    if [ ! -d "$ROOT_DIR/.venv" ]; then
+        echo "Creating Python virtual environment..."
+        python3 -m venv "$ROOT_DIR/.venv"
+    fi
+    source "$ROOT_DIR/.venv/bin/activate"
+    pip install -r "$ROOT_DIR/agentica/requirements.txt"
+    
+    echo "Setting up frontend..."
+    cd "$ROOT_DIR/dashboard"
+    npm install
+    cd "$ROOT_DIR"
+    
+    echo "Setup complete!"
+}
+
+cleanup() {
+    echo "Stopping services..."
+    stop
+    
+    echo "Cleaning up generated directories and files..."
+    rm -rf "$ROOT_DIR/.venv"
+    rm -rf "$ROOT_DIR/dashboard/node_modules"
+    rm -rf "$ROOT_DIR/dashboard/.next"
+    rm -rf "$ROOT_DIR/logs"
+    rm -rf "$ROOT_DIR/.pids"
+    
+    echo "Cleanup complete!"
+}
+
 case "$1" in
     start)
         start
@@ -186,8 +217,14 @@ case "$1" in
     status)
         status
         ;;
+    setup)
+        setup
+        ;;
+    cleanup)
+        cleanup
+        ;;
     *)
-        echo "Usage: $0 {start|stop|restart|status}"
+        echo "Usage: $0 {start|stop|restart|status|setup|cleanup}"
         exit 1
         ;;
 esac
