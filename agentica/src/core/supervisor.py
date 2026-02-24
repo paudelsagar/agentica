@@ -1,4 +1,5 @@
 import asyncio
+from collections import defaultdict
 from typing import Any, Dict, List, Literal, Optional
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -20,6 +21,91 @@ logger = get_logger(__name__)
 VALID_AGENTS = Literal[
     "ResearchAgent", "CoderAgent", "ReviewerAgent", "DataAgent", "DevTeam", "FINISH"
 ]
+
+AGENT_CAPABILITIES = {
+    "DataAgent": {
+        "description": "Database specialist with direct SQL access via MCP Toolbox. Handles ALL questions about internal/structured data.",
+        "triggers": [
+            "database",
+            "data",
+            "query",
+            "sql",
+            "users",
+            "user",
+            "accounts",
+            "account",
+            "merchants",
+            "merchant",
+            "transactions",
+            "transaction",
+            "payment",
+            "kyc",
+            "list",
+            "show",
+            "get",
+            "find",
+            "report",
+            "balance",
+            "volume",
+            "summary",
+            "pending",
+            "active",
+            "failed",
+            "verified",
+            "p2p",
+            "currency",
+            "daily",
+            "recent",
+            "travel",
+        ],
+        "tools": "MCP Toolbox for Databases (users, accounts, merchants, transactions, KYC, currency, reporting)",
+    },
+    "ResearchAgent": {
+        "description": "Web researcher with DuckDuckGo search. Handles questions requiring real-time info from the internet.",
+        "triggers": [
+            "search",
+            "web",
+            "internet",
+            "news",
+            "weather",
+            "price",
+            "stock",
+            "current",
+            "latest",
+            "trending",
+            "what is",
+            "who is",
+            "how to",
+            "wikipedia",
+            "article",
+            "blog",
+            "website",
+        ],
+        "tools": "web_search, summarize, save_memory, recall_memory",
+    },
+    "DevTeam": {
+        "description": "Development team (CoderAgent + ReviewerAgent + DevLead). Handles code writing, debugging, and review.",
+        "triggers": [
+            "code",
+            "implement",
+            "build",
+            "develop",
+            "fix",
+            "debug",
+            "write code",
+            "refactor",
+            "program",
+            "script",
+            "function",
+            "class",
+            "api",
+            "endpoint",
+            "test",
+            "review code",
+        ],
+        "tools": "write_code, execute_code, review_code",
+    },
+}
 
 
 class RouterDecision(BaseModel):
@@ -56,6 +142,33 @@ class SupervisorAgent(Agentica):
     #  Prompt Construction — extracted for clarity                        #
     # ------------------------------------------------------------------ #
 
+    def _classify_intent(self, query: str) -> Optional[str]:
+        """
+        Keyword-based pre-classification to assist LLM routing.
+        Returns the best-matching agent name, or None if ambiguous.
+        """
+        query_lower = query.lower()
+        scores = {}
+        for agent_name, caps in AGENT_CAPABILITIES.items():
+            score = sum(1 for t in caps["triggers"] if t in query_lower)
+            if score > 0:
+                scores[agent_name] = score
+
+        if not scores:
+            return None
+
+        # Return top match only if it has >= 2 keyword hits
+        best_agent = max(scores, key=scores.get)
+        if scores[best_agent] >= 2:
+            self.log.info(
+                "intent_classified",
+                query=query[:50],
+                agent=best_agent,
+                score=scores[best_agent],
+            )
+            return best_agent
+        return None
+
     def _build_system_prompt(
         self,
         state: Dict[str, Any],
@@ -64,20 +177,34 @@ class SupervisorAgent(Agentica):
         recalled_context: str,
         has_research_results: bool,
     ) -> str:
-        """Builds a lean system prompt with only relevant context."""
+        """Builds a system prompt with agent capability awareness and routing hints."""
         use_web = state.get("use_web", True)
+        task_context = state.get("task_context", "")
 
-        # Tool discovery (top 10, compact)
+        # Agent capability registry (always included)
+        caps_lines = []
+        for agent_name, caps in AGENT_CAPABILITIES.items():
+            if not use_web and agent_name == "ResearchAgent":
+                continue
+            caps_lines.append(
+                f"- {agent_name}: {caps['description']}\n  Tools: {caps['tools']}"
+            )
+        caps_section = "\n\nAVAILABLE AGENTS:\n" + "\n".join(caps_lines)
+
+        # Tool discovery — grouped by agent for clear routing context
         all_tools = tool_registry.list_tools()
         if not use_web:
             all_tools = [t for t in all_tools if t.owner_agent != "ResearchAgent"]
-        display_tools = all_tools[:10]
+        tools_by_agent = defaultdict(list)
+        for t in all_tools:
+            tools_by_agent[t.owner_agent].append(t.name)
         tools_section = ""
-        if display_tools:
+        if tools_by_agent:
             tools_str = "\n".join(
-                f"- {t.name} ({t.owner_agent})" for t in display_tools
+                f"- {agent}: {', '.join(tools)}"
+                for agent, tools in tools_by_agent.items()
             )
-            tools_section = f"\n\nAVAILABLE TOOLS:\n{tools_str}"
+            tools_section = f"\n\nREGISTERED TOOLS BY AGENT:\n{tools_str}"
 
         # Plan context
         plan_section = ""
@@ -103,10 +230,19 @@ class SupervisorAgent(Agentica):
         elif not use_web:
             delegation_guard = "\n\nCRITICAL: Web search is DISABLED. Do NOT delegate to ResearchAgent."
 
+        # Intent classification routing hint
+        routing_hint = ""
+        hint_agent = self._classify_intent(task_context)
+        if hint_agent:
+            routing_hint = (
+                f"\n\nROUTING HINT: This query strongly matches {hint_agent}'s capabilities. "
+                f"Delegate to {hint_agent} unless you have a specific reason not to."
+            )
+
         base_prompt = self.config.system_prompt or ""
         return (
-            f"{base_prompt}{tools_section}{plan_section}"
-            f"{recalled_context}{delegation_guard}"
+            f"{base_prompt}{caps_section}{tools_section}{plan_section}"
+            f"{recalled_context}{delegation_guard}{routing_hint}"
         )
 
     def _check_research_results(self, messages: List) -> bool:

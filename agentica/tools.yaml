@@ -1,19 +1,262 @@
-
 kind: sources
-name: chinook-db
-type: sqlite
-path: data/chinook.db
+name: payment-mysql
+type: mysql
+host: 127.0.0.1
+port: 3306
+database: payment_system
+user: root
+password: Mysql@12345
+
 ---
+# =========================
+# USERS
+# =========================
 kind: tools
 name: list_users
-type: sqlite-sql
-source: chinook-db
-description: "Lists all users from the database."
-statement: "SELECT * FROM users;"
+type: mysql-sql
+source: payment-mysql
+description: "List all registered users"
+statement: |
+  SELECT id, user_id, name, email, phone, created_at
+  FROM users
+  ORDER BY id;
+
 ---
 kind: tools
-name: count_users
-type: sqlite-sql
-source: chinook-db
-description: "Counts total number of users."
-statement: "SELECT COUNT(*) as count FROM users;"
+name: get_user_by_user_id
+type: mysql-sql
+source: payment-mysql
+description: "Get a single user by user_id"
+statement: |
+  SELECT id, user_id, name, email, phone, created_at
+  FROM users
+  WHERE user_id = :user_id;
+
+---
+kind: tools
+name: verified_users
+type: mysql-sql
+source: payment-mysql
+description: "List users with VERIFIED KYC"
+statement: |
+  SELECT u.user_id, u.name, u.email, k.document_type, k.verified_at
+  FROM users u
+  JOIN user_kyc k ON u.id = k.user_id
+  WHERE k.kyc_status = 'VERIFIED';
+
+---
+kind: tools
+name: pending_kyc_users
+type: mysql-sql
+source: payment-mysql
+description: "List users with PENDING KYC"
+statement: |
+  SELECT u.user_id, u.name, u.email, k.document_type
+  FROM users u
+  JOIN user_kyc k ON u.id = k.user_id
+  WHERE k.kyc_status = 'PENDING';
+
+---
+# =========================
+# ACCOUNTS
+# =========================
+kind: tools
+name: list_accounts
+type: mysql-sql
+source: payment-mysql
+description: "List all accounts"
+statement: |
+  SELECT a.account_id, u.user_id AS owner, a.account_type,
+         a.currency, a.status, a.created_at
+  FROM accounts a
+  JOIN users u ON a.user_id = u.id
+  ORDER BY a.created_at DESC;
+
+---
+kind: tools
+name: active_accounts
+type: mysql-sql
+source: payment-mysql
+description: "List ACTIVE accounts"
+statement: |
+  SELECT a.account_id, u.user_id AS owner,
+         a.account_type, a.currency
+  FROM accounts a
+  JOIN users u ON a.user_id = u.id
+  WHERE a.status = 'ACTIVE';
+
+---
+kind: tools
+name: accounts_by_user
+type: mysql-sql
+source: payment-mysql
+description: "List accounts for a specific user"
+statement: |
+  SELECT a.account_id, a.account_type, a.currency, a.status
+  FROM accounts a
+  JOIN users u ON a.user_id = u.id
+  WHERE u.user_id = :user_id;
+
+---
+# =========================
+# MERCHANTS
+# =========================
+kind: tools
+name: list_merchants
+type: mysql-sql
+source: payment-mysql
+description: "List all merchants"
+statement: |
+  SELECT merchant_id, merchant_name,
+         merchant_category, mcc_code, created_at
+  FROM merchants
+  ORDER BY merchant_name;
+
+---
+kind: tools
+name: merchant_transactions
+type: mysql-sql
+source: payment-mysql
+description: "List transactions for a specific merchant"
+statement: |
+  SELECT t.tran_id, u.user_id AS payer,
+         m.merchant_name, t.amount, t.tran_date
+  FROM transactions t
+  JOIN users u ON t.user_id = u.id
+  JOIN merchants m ON t.merchant_id = m.id
+  WHERE m.merchant_id = :merchant_id
+  ORDER BY t.tran_date DESC;
+
+---
+# =========================
+# TRANSACTIONS
+# =========================
+kind: tools
+name: list_transactions
+type: mysql-sql
+source: payment-mysql
+description: "List all transactions with full details"
+statement: |
+  SELECT t.tran_id, t.tran_date,
+         u.user_id AS from_user,
+         a.account_id AS from_account,
+         cp_u.user_id AS to_user,
+         cp_a.account_id AS to_account,
+         tt.transaction_type_id,
+         pm.payment_method_id,
+         m.merchant_name,
+         t.amount,
+         c.currency,
+         ch.channel_id,
+         ts.status_id
+  FROM transactions t
+  JOIN users u ON t.user_id = u.id
+  JOIN accounts a ON t.account_id = a.id
+  LEFT JOIN users cp_u ON t.counterparty_user_id = cp_u.id
+  LEFT JOIN accounts cp_a ON t.counterparty_account_id = cp_a.id
+  LEFT JOIN transaction_types tt ON t.transaction_type_id = tt.id
+  LEFT JOIN payment_methods pm ON t.payment_method_id = pm.id
+  LEFT JOIN merchants m ON t.merchant_id = m.id
+  JOIN currencies c ON t.currency_id = c.id
+  JOIN channels ch ON t.channel_id = ch.id
+  JOIN transaction_status ts ON t.transaction_status_id = ts.id
+  ORDER BY t.tran_date DESC;
+
+---
+kind: tools
+name: recent_transactions
+type: mysql-sql
+source: payment-mysql
+description: "Get last 10 transactions"
+statement: |
+  SELECT tran_id, tran_date, amount
+  FROM transactions
+  ORDER BY tran_date DESC
+  LIMIT 10;
+
+---
+kind: tools
+name: transactions_by_user
+type: mysql-sql
+source: payment-mysql
+description: "List transactions for a specific user"
+statement: |
+  SELECT t.tran_id, t.tran_date,
+         t.amount, ts.status_id,
+         tt.transaction_type_id
+  FROM transactions t
+  JOIN users u ON t.user_id = u.id
+  JOIN transaction_status ts ON t.transaction_status_id = ts.id
+  JOIN transaction_types tt ON t.transaction_type_id = tt.id
+  WHERE u.user_id = :user_id
+  ORDER BY t.tran_date DESC;
+
+---
+kind: tools
+name: p2p_transactions
+type: mysql-sql
+source: payment-mysql
+description: "List all peer-to-peer transactions"
+statement: |
+  SELECT t.tran_id,
+         u.user_id AS sender,
+         cp_u.user_id AS receiver,
+         t.amount,
+         t.tran_date
+  FROM transactions t
+  JOIN users u ON t.user_id = u.id
+  JOIN users cp_u ON t.counterparty_user_id = cp_u.id
+  JOIN transaction_types tt ON t.transaction_type_id = tt.id
+  WHERE tt.transaction_type_id = 'P2P'
+  ORDER BY t.tran_date DESC;
+
+---
+kind: tools
+name: failed_transactions
+type: mysql-sql
+source: payment-mysql
+description: "List FAILED transactions"
+statement: |
+  SELECT t.tran_id, u.user_id, t.amount, t.tran_date
+  FROM transactions t
+  JOIN users u ON t.user_id = u.id
+  JOIN transaction_status ts ON t.transaction_status_id = ts.id
+  WHERE ts.status_id = 'FAILED'
+  ORDER BY t.tran_date DESC;
+
+---
+# =========================
+# REPORTING / SUMMARY
+# =========================
+kind: tools
+name: daily_transaction_summary
+type: mysql-sql
+source: payment-mysql
+description: "Daily transaction summary grouped by type and status"
+statement: |
+  SELECT DATE(t.tran_date) AS tran_date,
+         tt.transaction_type_id,
+         ts.status_id,
+         COUNT(*) AS total_transactions,
+         SUM(t.amount) AS total_amount
+  FROM transactions t
+  JOIN transaction_types tt ON t.transaction_type_id = tt.id
+  JOIN transaction_status ts ON t.transaction_status_id = ts.id
+  GROUP BY DATE(t.tran_date),
+           tt.transaction_type_id,
+           ts.status_id
+  ORDER BY tran_date DESC;
+
+---
+kind: tools
+name: total_volume_by_currency
+type: mysql-sql
+source: payment-mysql
+description: "Total transaction volume grouped by currency"
+statement: |
+  SELECT c.currency,
+         COUNT(*) AS total_transactions,
+         SUM(t.amount) AS total_amount
+  FROM transactions t
+  JOIN currencies c ON t.currency_id = c.id
+  GROUP BY c.currency;

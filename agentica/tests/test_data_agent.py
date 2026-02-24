@@ -23,7 +23,10 @@ def mock_config():
 
 def test_data_agent_initialization(mock_config):
     """Test that DataAgent initializes correctly."""
-    with patch("src.agents.data_agent.load_agent_config", return_value=mock_config):
+    with patch(
+        "src.agents.data_agent.load_agent_config", return_value=mock_config
+    ), patch("src.core.agent.Agentica._get_llm") as mock_get_llm:
+        mock_get_llm.return_value = AsyncMock()
         agent = DataAgent()
         assert agent.config.name == "DataAgent"
         assert agent._tools_loaded is False
@@ -32,7 +35,10 @@ def test_data_agent_initialization(mock_config):
 @pytest.mark.asyncio
 async def test_data_agent_tool_loading(mock_config):
     """Test that tools are loaded via attach_mcp_server."""
-    with patch("src.agents.data_agent.load_agent_config", return_value=mock_config):
+    with patch(
+        "src.agents.data_agent.load_agent_config", return_value=mock_config
+    ), patch("src.core.agent.Agentica._get_llm") as mock_get_llm:
+        mock_get_llm.return_value = AsyncMock()
         agent = DataAgent()
 
         # Mock attach_mcp_server (which is on the base class Agentica)
@@ -48,7 +54,10 @@ async def test_data_agent_tool_loading(mock_config):
 @pytest.mark.asyncio
 async def test_data_agent_call_triggers_loading(mock_config):
     """Test that calling the agent triggers lazy tool loading."""
-    with patch("src.agents.data_agent.load_agent_config", return_value=mock_config):
+    with patch(
+        "src.agents.data_agent.load_agent_config", return_value=mock_config
+    ), patch("src.core.agent.Agentica._get_llm") as mock_get_llm:
+        mock_get_llm.return_value = AsyncMock()
         agent = DataAgent()
 
         # Mock _load_toolbox_tools and super().__call__
