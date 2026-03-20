@@ -72,20 +72,23 @@ This will launch:
 ## 📊 Monitoring & Management
 
 The **Next.js Dashboard** provides a comprehensive suite of tools:
-
-````carousel
+#### Live Agentic Chat
 ![Live Agentic Chat](assets/agentic-chat.png)
-<!-- slide -->
+
+#### System Performance Monitoring
 ![System Performance Monitoring](assets/monitoring.png)
-<!-- slide -->
+
+#### Agent Settings & Lifecycle
 ![Agent Settings & Lifecycle](assets/agent.png)
-<!-- slide -->
+
+#### MCP Server Registry
 ![MCP Server Registry](assets/mcp-servers.png)
-<!-- slide -->
+
+#### Model Tier Mapping
 ![Model Tier Mapping](assets/models.png)
-<!-- slide -->
+
+#### API Secrets Management
 ![API Secrets Management](assets/api-secrets.png)
-````
 
 - **Chat Interface**: Live interaction with the agentic system with streaming responses.
 - **System Metrics**: Real-time tracking of latency, token consumption, and model distribution.
