@@ -77,9 +77,9 @@ stop_dashboard() {
         PID=$(cat "$DASHBOARD_PID_FILE")
         if ps -p $PID > /dev/null 2>&1; then
             echo "Stopping Dashboard (PID: $PID)..."
-            # npm run dev starts child processes, we need to kill the process group or children
-            pkill -P $PID
-            kill $PID
+            # next dev starts multiple processes, kill all related ones
+            pkill -f "next dev"
+            kill $PID 2>/dev/null
             rm "$DASHBOARD_PID_FILE"
             echo "Dashboard stopped"
         else
@@ -97,13 +97,10 @@ start() {
     fi
 
     echo "Starting server..."
-    if [ -d "$ROOT_DIR/.venv" ]; then
-        source "$ROOT_DIR/.venv/bin/activate"
-    fi
     
     cd "$ROOT_DIR/agentica"
     export PYTHONPATH="$ROOT_DIR/agentica:$PYTHONPATH"
-    nohup uvicorn server:app --host 0.0.0.0 --port $PORT --log-level info > "$LOG_FILE" 2>&1 &
+    nohup uv run uvicorn server:app --host 0.0.0.0 --port $PORT --log-level info > "$LOG_FILE" 2>&1 &
     echo $! > "$PID_FILE"
     cd "$ROOT_DIR"
     
@@ -173,12 +170,8 @@ status() {
 
 setup() {
     echo "Setting up backend..."
-    if [ ! -d "$ROOT_DIR/.venv" ]; then
-        echo "Creating Python virtual environment..."
-        python3 -m venv "$ROOT_DIR/.venv"
-    fi
-    source "$ROOT_DIR/.venv/bin/activate"
-    pip install -r "$ROOT_DIR/agentica/requirements.txt"
+    uv sync
+    
     
     echo "Setting up frontend..."
     cd "$ROOT_DIR/dashboard"
